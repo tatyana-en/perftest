@@ -178,15 +178,15 @@
 #define CYCLES	"cycles"
 #define USEC	"usec"
 /* The format of the results */
-#define RESULT_FMT		" #bytes     #iterations    BW peak[MB/sec]    BW average[MB/sec]   MsgRate[Mpps]"
+#define RESULT_FMT		" #bytes     #iterations    BW peak[MiB/sec]    BW average[MiB/sec]   MsgRate[Mpps]"
 
-#define RESULT_FMT_PER_PORT	" #bytes     #iterations    BW peak[MB/sec]    BW average[MB/sec]   MsgRate[Mpps]   BW Port1[MB/sec]   MsgRate Port1[Mpps]   BW Port2[MB/sec]   MsgRate Port2[Mpps]"
+#define RESULT_FMT_PER_PORT	" #bytes     #iterations    BW peak[MiB/sec]    BW average[MiB/sec]   MsgRate[Mpps]   BW Port1[MiB/sec]   MsgRate Port1[Mpps]   BW Port2[MiB/sec]   MsgRate Port2[Mpps]"
 
 #define RESULT_FMT_G	" #bytes     #iterations    BW peak[Gb/sec]    BW average[Gb/sec]   MsgRate[Mpps]"
 
 #define RESULT_FMT_G_PER_PORT	" #bytes     #iterations    BW peak[Gb/sec]    BW average[Gb/sec]   MsgRate[Mpps]   BW Port1[Gb/sec]   MsgRate Port1[Mpps]   BW Port2[Gb/sec]   MsgRate Port2[Mpps]"
 
-#define RESULT_FMT_QOS  " #bytes    #sl      #iterations    BW peak[MB/sec]    BW average[MB/sec]   MsgRate[Mpps]"
+#define RESULT_FMT_QOS  " #bytes    #sl      #iterations    BW peak[MiB/sec]    BW average[MiB/sec]   MsgRate[Mpps]"
 
 #define RESULT_FMT_G_QOS  " #bytes    #sl      #iterations    BW peak[Gb/sec]    BW average[Gb/sec]   MsgRate[Mpps]"
 
@@ -263,7 +263,7 @@ typedef enum { ITERATIONS , DURATION } TestMethod;
 /* for duration calculation */
 typedef enum { START_STATE, SAMPLE_STATE, STOP_SAMPLE_STATE, END_STATE} DurationStates;
 
-/* Report format (Gbit/s VS MB/s) */
+/* Report format (Gbit/s VS MiB/s) */
 enum ctx_report_fmt { GBS, MBS };
 
 /* Test method */
@@ -290,7 +290,8 @@ enum ctx_device {
 	CONNECTX5		= 15,
 	CONNECTX5EX		= 16,
 	CONNECTX6		= 17,
-	BLUEFIELD		= 18
+	BLUEFIELD		= 18,
+	INTEL_ALL		= 19
 };
 
 /* Units for rate limiter */
