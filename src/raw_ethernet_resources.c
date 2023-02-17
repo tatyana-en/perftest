@@ -55,12 +55,11 @@
 #include <config.h>
 #endif
 
-struct perftest_parameters* duration_param;
+extern struct perftest_parameters* duration_param;
 
 int check_flow_steering_support(char *dev_name)
 {
 	char* file_name = "/sys/module/mlx4_core/parameters/log_num_mgm_entry_size";
-	char* openibd_path = "/etc/init.d/openibd";
 	FILE *fp;
 	char line[4];
 	int is_flow_steering_supported = 0;
@@ -71,11 +70,14 @@ int check_flow_steering_support(char *dev_name)
 	fp = fopen(file_name, "r");
 	if (fp == NULL)
 		return 0;
-	if (fgets(line, 4, fp) == NULL)
+	if (fgets(line, 4, fp) == NULL){
+		fclose(fp);
 		return 0;
+	}
 
 	int val = atoi(line);
 	if (val >= 0) {
+		char* openibd_path = "/etc/init.d/openibd";
 		fprintf(stderr,"flow steering is not supported.\n");
 		fprintf(stderr," please run: echo options mlx4_core log_num_mgm_entry_size=-1 >> /etc/modprobe.d/mlnx.conf\n");
 		if (access(openibd_path, F_OK) != -1)
@@ -100,17 +102,13 @@ static void mac_from_user(uint8_t   *mac, uint8_t *gid,int size )
 /******************************************************************************
  *
  ******************************************************************************/
-static uint16_t ip_checksum	(void * buf,size_t 	  hdr_len)
+static uint16_t ip_checksum(union IP_V4_header_raw *iph, size_t hdr_len)
 {
-	unsigned long sum = 0;
-	const uint16_t *ip1;
-	ip1 = buf;
-	while (hdr_len > 1) {
-		sum += *ip1++;
-		if (sum & 0x80000000)
-			sum = (sum & 0xFFFF) + (sum >> 16);
-		hdr_len -= 2;
-	}
+	size_t idx = hdr_len / 4;
+	unsigned long long sum = 0;
+
+	while (idx)
+		sum += iph->raw[--idx];
 	while (sum >> 16)
 		sum = (sum & 0xFFFF) + (sum >> 16);
 
@@ -144,26 +142,27 @@ void gen_ipv6_header(void* ip_header_buffer, uint8_t* saddr, uint8_t* daddr,
 /******************************************************************************
  *
  ******************************************************************************/
+// cppcheck-suppress constParameter
 void gen_ipv4_header(void* ip_header_buffer, uint32_t* saddr, uint32_t* daddr,
 		     uint8_t protocol, int pkt_size, int ttl, int tos, int flows_offset)
 {
-	struct IP_V4_header ip_header;
+	union IP_V4_header_raw raw;
 
-	memset(&ip_header,0,sizeof(struct IP_V4_header));
+	memset(&raw.ip_header, 0, sizeof(struct IP_V4_header));
 
-	ip_header.version = 4;
-	ip_header.ihl = 5;
-	ip_header.tos = (tos == DEF_TOS)? 0 : tos;
-	ip_header.tot_len = htons(pkt_size);
-	ip_header.id = htons(0);
-	ip_header.frag_off = htons(0);
-	ip_header.ttl = ttl;
-	ip_header.protocol = protocol;
-	ip_header.saddr = *saddr;
-	ip_header.daddr = *daddr;
-	ip_header.check = ip_checksum((void*)&ip_header,sizeof(struct IP_V4_header));
+	raw.ip_header.version = 4;
+	raw.ip_header.ihl = 5;
+	raw.ip_header.tos = (tos == DEF_TOS)? 0 : tos;
+	raw.ip_header.tot_len = htons(pkt_size);
+	raw.ip_header.id = htons(0);
+	raw.ip_header.frag_off = htons(0);
+	raw.ip_header.ttl = ttl;
+	raw.ip_header.protocol = protocol;
+	raw.ip_header.saddr = *saddr;
+	raw.ip_header.daddr = *daddr;
+	raw.ip_header.check = ip_checksum(&raw, sizeof(struct IP_V4_header));
 
-	memcpy(ip_header_buffer, &ip_header, sizeof(struct IP_V4_header));
+	memcpy(ip_header_buffer, &raw.ip_header, sizeof(struct IP_V4_header));
 }
 
 /******************************************************************************
@@ -204,58 +203,46 @@ void gen_tcp_header(void* TCP_header_buffer,int src_port ,int dst_port)
  * generates a new ethernet header
  *****************************************************************************/
 void gen_eth_header(struct ETH_header* eth_header,uint8_t* src_mac,
-		uint8_t* dst_mac, uint16_t eth_type)
+		uint8_t* dst_mac, uint16_t eth_type, struct perftest_parameters* user_param)
 {
-	memcpy(eth_header->src_mac, src_mac, 6);
-	memcpy(eth_header->dst_mac, dst_mac, 6);
-	eth_header->eth_type = htons(eth_type);
-
+	#ifdef HAVE_CUDA
+	if (user_param->use_cuda) {
+		uint16_t eth_type_temp = htons(eth_type);
+		cuMemcpy((CUdeviceptr)eth_header->src_mac, (CUdeviceptr)src_mac, 6);
+		cuMemcpy((CUdeviceptr)eth_header->dst_mac, (CUdeviceptr)dst_mac, 6);
+		cuMemcpy((CUdeviceptr)&(eth_header->eth_type), (CUdeviceptr)&eth_type_temp, sizeof(uint16_t));
+	} else
+	#endif
+	{
+		memcpy(eth_header->src_mac, src_mac, 6);
+		memcpy(eth_header->dst_mac, dst_mac, 6);
+		eth_header->eth_type = htons(eth_type);
+	}
 }
 
 static int get_ip_size(int is_ipv6)
 {
 #ifdef HAVE_IPV6
 	if (is_ipv6)
-#ifdef HAVE_RAW_ETH_EXP
-		return sizeof(struct ibv_exp_flow_spec_ipv6_ext);
-#else
 		return sizeof(struct ibv_flow_spec_ipv6);
 #endif
-#endif /* HAVE_IPV6 */
 
-#ifdef HAVE_RAW_ETH_EXP
-#ifdef HAVE_IPV4_EXT
-		return sizeof(struct ibv_exp_flow_spec_ipv4_ext);
-#else
-		return sizeof(struct ibv_exp_flow_spec_ipv4);
-#endif /* HAVE_IPV4_EXT */
-#else
 #ifdef HAVE_IPV4_EXT
 		return sizeof(struct ibv_flow_spec_ipv4_ext);
 #else
 		return sizeof(struct ibv_flow_spec_ipv4);
 #endif /* HAVE_IPV4_EXT */
-#endif
 }
 
 /******************************************************************************
  * print test specification
  ******************************************************************************/
-#ifdef HAVE_RAW_ETH_EXP
-void print_spec(struct ibv_exp_flow_attr* flow_rules,struct perftest_parameters* user_param)
-{
-	struct ibv_exp_flow_spec* spec_info = NULL;
-	#ifdef HAVE_IPV6
-	struct ibv_exp_flow_spec_ipv6_ext *ipv6_spec;
-	#endif
-#else
 void print_spec(struct ibv_flow_attr* flow_rules,struct perftest_parameters* user_param)
 {
 		struct ibv_flow_spec* spec_info = NULL;
 		#ifdef HAVE_IPV6
 		struct ibv_flow_spec_ipv6 *ipv6_spec;
 		#endif
-#endif
 		void* header_buff = (void*)flow_rules;
 		int ip_size = get_ip_size(user_param->raw_ipv6);
 
@@ -268,13 +255,10 @@ void print_spec(struct ibv_flow_attr* flow_rules,struct perftest_parameters* use
 			return;
 		}
 
-		#ifdef HAVE_RAW_ETH_EXP
-		header_buff = header_buff + sizeof(struct ibv_exp_flow_attr);
-		spec_info = (struct ibv_exp_flow_spec*)header_buff;
-		#else
+		// cppcheck-suppress arithOperationsOnVoidPointer
 		header_buff = header_buff + sizeof(struct ibv_flow_attr);
 		spec_info = (struct ibv_flow_spec*)header_buff;
-		#endif
+
 		printf("MAC attached  : %02X:%02X:%02X:%02X:%02X:%02X\n",
 				spec_info->eth.val.dst_mac[0],
 				spec_info->eth.val.dst_mac[1],
@@ -290,18 +274,11 @@ void print_spec(struct ibv_flow_attr* flow_rules,struct perftest_parameters* use
 			char str_ip6_s[INET6_ADDRSTRLEN] = {0};
 			char str_ip6_d[INET6_ADDRSTRLEN] = {0};
 			#endif
-			#ifdef HAVE_RAW_ETH_EXP
-			header_buff = header_buff + sizeof(struct ibv_exp_flow_spec_eth);
-			spec_info = (struct ibv_exp_flow_spec*)header_buff;
-			#ifdef HAVE_IPV6
-			ipv6_spec = &spec_info->ipv6_ext;
-			#endif
-			#else
+			// cppcheck-suppress arithOperationsOnVoidPointer
 			header_buff = header_buff + sizeof(struct ibv_flow_spec_eth);
 			spec_info = (struct ibv_flow_spec*)header_buff;
 			#ifdef HAVE_IPV6
 			ipv6_spec = &spec_info->ipv6;
-			#endif
 			#endif
 			if (!user_param->raw_ipv6) {
 				uint32_t dst_ip = spec_info->ipv4.val.dst_ip;
@@ -322,8 +299,8 @@ void print_spec(struct ibv_flow_attr* flow_rules,struct perftest_parameters* use
 				#endif
 			}
 		}
-
 		if (user_param->is_server_port && user_param->is_client_port) {
+			// cppcheck-suppress arithOperationsOnVoidPointer
 			header_buff = header_buff + ip_size;
 			spec_info = header_buff;
 			printf("spec_info - dst_port : %d\n",ntohs(spec_info->tcp_udp.val.dst_port));
@@ -344,12 +321,30 @@ static char *etype_str(uint16_t etype)
 /******************************************************************************
  *
  ******************************************************************************/
-void print_ethernet_header(void* in_ethernet_header)
+void print_ethernet_header(void* in_ethernet_header, struct perftest_parameters* user_param)
 {
 	struct ETH_header* p_ethernet_header = in_ethernet_header;
+	uint8_t* p_src_mac;
+	uint8_t* p_dst_mac;
+	uint16_t p_eth_type;
 	if (NULL == p_ethernet_header) {
 		fprintf(stderr, "ETH_header pointer is Null\n");
 		return;
+	}
+
+	#ifdef HAVE_CUDA
+	if (user_param->use_cuda) {
+		ALLOCATE(p_src_mac, uint8_t, 6);
+		ALLOCATE(p_dst_mac, uint8_t, 6);
+		cuMemcpy((CUdeviceptr)p_src_mac, (CUdeviceptr)p_ethernet_header->src_mac, 6);
+		cuMemcpy((CUdeviceptr)p_dst_mac, (CUdeviceptr)p_ethernet_header->dst_mac, 6);
+		cuMemcpy((CUdeviceptr)&p_eth_type, (CUdeviceptr)&p_ethernet_header->eth_type, sizeof(uint16_t));
+	} else
+	#endif
+	{
+		p_src_mac = p_ethernet_header->src_mac;
+		p_dst_mac = p_ethernet_header->dst_mac;
+		p_eth_type = p_ethernet_header->eth_type;
 	}
 
 	printf("**raw ethernet header****************************************\n\n");
@@ -358,65 +353,95 @@ void print_ethernet_header(void* in_ethernet_header)
 	printf("|------------------------------------------------------------|\n");
 	printf("|");
 	printf(PERF_MAC_FMT,
-			p_ethernet_header->dst_mac[0],
-			p_ethernet_header->dst_mac[1],
-			p_ethernet_header->dst_mac[2],
-			p_ethernet_header->dst_mac[3],
-			p_ethernet_header->dst_mac[4],
-			p_ethernet_header->dst_mac[5]);
+			p_dst_mac[0],
+			p_dst_mac[1],
+			p_dst_mac[2],
+			p_dst_mac[3],
+			p_dst_mac[4],
+			p_dst_mac[5]);
 	printf("|");
 	printf(PERF_MAC_FMT,
-			p_ethernet_header->src_mac[0],
-			p_ethernet_header->src_mac[1],
-			p_ethernet_header->src_mac[2],
-			p_ethernet_header->src_mac[3],
-			p_ethernet_header->src_mac[4],
-			p_ethernet_header->src_mac[5]);
+			p_src_mac[0],
+			p_src_mac[1],
+			p_src_mac[2],
+			p_src_mac[3],
+			p_src_mac[4],
+			p_src_mac[5]);
 	printf("|");
-	char* eth_type = etype_str((ntohs(p_ethernet_header->eth_type)));
+	char* eth_type = etype_str((ntohs(p_eth_type)));
 	printf("%-22s|\n",eth_type);
 	printf("|------------------------------------------------------------|\n\n");
 
+	#ifdef HAVE_CUDA
+	if (user_param->use_cuda) {
+		free(p_src_mac);
+		free(p_dst_mac);
+	}
+	#endif
 }
 /******************************************************************************
 *
 ******************************************************************************/
-void print_ethernet_vlan_header(void* in_ethernet_header)
+void print_ethernet_vlan_header(void* in_ethernet_header, struct perftest_parameters* user_param)
 {
 	struct ETH_vlan_header* p_ethernet_header = in_ethernet_header;
-        if (NULL == p_ethernet_header) {
-                fprintf(stderr, "ETH_header pointer is Null\n");
-                return;
-        }
+	uint8_t* p_src_mac;
+	uint8_t* p_dst_mac;
+	uint16_t p_eth_type;
+	uint32_t p_vlan_header;
+	if (NULL == p_ethernet_header) {
+			fprintf(stderr, "ETH_header pointer is Null\n");
+			return;
+	}
+	#ifdef HAVE_CUDA
+	if (user_param->use_cuda) {
+		ALLOCATE(p_src_mac, uint8_t, 6);
+		ALLOCATE(p_dst_mac, uint8_t, 6);
+		cuMemcpy((CUdeviceptr)p_src_mac, (CUdeviceptr)p_ethernet_header->src_mac, 6);
+		cuMemcpy((CUdeviceptr)p_dst_mac, (CUdeviceptr)p_ethernet_header->dst_mac, 6);
+		cuMemcpy((CUdeviceptr)&p_eth_type, (CUdeviceptr)&p_ethernet_header->eth_type, sizeof(uint16_t));
+		cuMemcpy((CUdeviceptr)&p_vlan_header, (CUdeviceptr)&p_ethernet_header->vlan_header, sizeof(uint32_t));
+	} else
+	#endif
+	{
+		p_src_mac = p_ethernet_header->src_mac;
+		p_dst_mac = p_ethernet_header->dst_mac;
+		p_eth_type = p_ethernet_header->eth_type;
+		p_vlan_header = p_ethernet_header->vlan_header;
+	}
+	printf("**raw ethernet header****************************************\n\n");
+	printf("----------------------------------------------------------------------------\n");
+	printf("| Dest MAC         | Src MAC          |    vlan tag    |   Packet Type     |\n");
+	printf("|--------------------------------------------------------------------------|\n");
+	printf("|");
+	printf(PERF_MAC_FMT,
+					p_dst_mac[0],
+					p_dst_mac[1],
+					p_dst_mac[2],
+					p_dst_mac[3],
+					p_dst_mac[4],
+					p_dst_mac[5]);
+	printf("|");
+	printf(PERF_MAC_FMT,
+					p_src_mac[0],
+					p_src_mac[1],
+					p_src_mac[2],
+					p_src_mac[3],
+					p_src_mac[4],
+					p_src_mac[5]);
+	printf("|");
+	printf("   0x%08x   ",ntohl(p_vlan_header));
 
-        printf("**raw ethernet header****************************************\n\n");
-        printf("----------------------------------------------------------------------------\n");
-        printf("| Dest MAC         | Src MAC          |    vlan tag    |   Packet Type     |\n");
-        printf("|--------------------------------------------------------------------------|\n");
-        printf("|");
-        printf(PERF_MAC_FMT,
-                        p_ethernet_header->dst_mac[0],
-                        p_ethernet_header->dst_mac[1],
-                        p_ethernet_header->dst_mac[2],
-                        p_ethernet_header->dst_mac[3],
-                        p_ethernet_header->dst_mac[4],
-                        p_ethernet_header->dst_mac[5]);
-        printf("|");
-        printf(PERF_MAC_FMT,
-                        p_ethernet_header->src_mac[0],
-                        p_ethernet_header->src_mac[1],
-                        p_ethernet_header->src_mac[2],
-                        p_ethernet_header->src_mac[3],
-                        p_ethernet_header->src_mac[4],
-                        p_ethernet_header->src_mac[5]);
-        printf("|");
-        printf("   0x%08x   ",ntohl(p_ethernet_header->vlan_header));
-
-        printf("|");
-        char* eth_type = (ntohs(p_ethernet_header->eth_type) ==  IP_ETHER_TYPE ? "IP" : "DEFAULT");
-        printf("%-19s|\n",eth_type);
-        printf("|--------------------------------------------------------------------------|\n\n");
-
+	printf("|");
+	char* eth_type = (ntohs(p_eth_type) ==  IP_ETHER_TYPE ? "IP" : "DEFAULT");
+	printf("%-19s|\n",eth_type);
+	printf("|--------------------------------------------------------------------------|\n\n");
+	#ifdef HAVE_CUDA
+	if (user_param->use_cuda) {
+		free(p_src_mac);
+		free(p_dst_mac);
+	}
+	#endif
 }
 /******************************************************************************
  *
@@ -533,8 +558,9 @@ void print_pkt(void* pkt,struct perftest_parameters *user_param)
 		return;
 	}
 
-	user_param->print_eth_func((struct ETH_header*)pkt);
+	user_param->print_eth_func((struct ETH_header*)pkt, user_param);
 	if(user_param->is_client_ip || user_param->is_server_ip) {
+		// cppcheck-suppress arithOperationsOnVoidPointer
 		pkt = (void*)pkt + sizeof(struct ETH_header);
 		if (user_param->raw_ipv6)
 			print_ip6_header((struct IP_V6_header*)pkt);
@@ -543,10 +569,14 @@ void print_pkt(void* pkt,struct perftest_parameters *user_param)
 	}
 
 	if(user_param->is_client_port && user_param->is_server_port) {
-		if (user_param->raw_ipv6)
+		if (user_param->raw_ipv6) {
+			// cppcheck-suppress arithOperationsOnVoidPointer
 			pkt = pkt + sizeof(struct IP_V6_header);
-		else
+		}
+		else {
+			// cppcheck-suppress arithOperationsOnVoidPointer
 			pkt = pkt + sizeof(struct IP_V4_header);
+		}
 		if (user_param->tcp)
 			print_tcp_header((struct TCP_header*)pkt);
 		else
@@ -575,20 +605,31 @@ void build_pkt_on_buffer(struct ETH_header* eth_header,
 		vlan_pcp = user_param->vlan_pcp;
 	}
 
-	gen_eth_header(eth_header, my_dest_info->mac, rem_dest_info->mac, eth_type);
+	gen_eth_header(eth_header, my_dest_info->mac, rem_dest_info->mac, eth_type, user_param);
 
 	if(user_param->vlan_en) {
 		struct ETH_vlan_header *p_eth_vlan = (struct ETH_vlan_header *)eth_header;
-		p_eth_vlan->eth_type = eth_header->eth_type;
-		p_eth_vlan->vlan_header = htonl(VLAN_TPID << 16 |
-								((vlan_pcp & 0x7) << 13) | VLAN_VID | VLAN_CFI << 12);
+		// cppcheck-suppress integerOverflow
+		uint32_t vlan_header = htonl(VLAN_TPID << 16 |
+								((vlan_pcp & 0x7) << 13) | VLAN_VID | VLAN_CFI << 12);;
+		#ifdef HAVE_CUDA
+		if (user_param->use_cuda) {
+			cuMemcpyDtoD((CUdeviceptr)&p_eth_vlan->eth_type, (CUdeviceptr)&eth_header->eth_type, sizeof(uint16_t));
+			cuMemcpy((CUdeviceptr)&(p_eth_vlan->vlan_header), (CUdeviceptr)&vlan_header, sizeof(uint32_t));
+		} else
+		#endif
+		{
+			p_eth_vlan->eth_type = eth_header->eth_type;
+			p_eth_vlan->vlan_header = vlan_header;
+		}
+
 		eth_header_size = sizeof(struct ETH_vlan_header);
 		pkt_size -=4;
 	}
 
 	if(have_ip_header) {
 		int offset = is_udp_or_tcp ? 0 : flows_offset;
-
+		// cppcheck-suppress arithOperationsOnVoidPointer
 		header_buff = (void*)eth_header + eth_header_size;
 		if (user_param->raw_ipv6)
 			gen_ipv6_header(header_buff, my_dest_info->ip6,
@@ -601,10 +642,14 @@ void build_pkt_on_buffer(struct ETH_header* eth_header,
 	}
 
 	if(is_udp_or_tcp) {
-		if (user_param->raw_ipv6)
+		if (user_param->raw_ipv6) {
+			// cppcheck-suppress arithOperationsOnVoidPointer
 			header_buff = header_buff + sizeof(struct IP_V6_header);
-		else
+		}
+		else {
+			// cppcheck-suppress arithOperationsOnVoidPointer
 			header_buff = header_buff + sizeof(struct IP_V4_header);
+		}
 		if (user_param->tcp)
 			gen_tcp_header(header_buff, my_dest_info->port + flows_offset,
 				       rem_dest_info->port + flows_offset);
@@ -632,10 +677,8 @@ void create_raw_eth_pkt( struct perftest_parameters *user_param,
 		struct raw_ethernet_info	*my_dest_info,
 		struct raw_ethernet_info	*rem_dest_info)
 {
-	int pkt_offset = 0;
-	int flow_limit = 0;
-	int i = 0;
-	int print_flag = (user_param->vlan_pcp==VLAN_PCP_VARIOUS) ? PRINT_ON:PRINT_OFF;
+	int pkt_offset;
+	int i;
 	struct ETH_header* eth_header;
 	uint16_t vlan_tag_size = user_param->vlan_en ? 4 : 0;
 	uint16_t ip_next_protocol = 0;
@@ -648,14 +691,14 @@ void create_raw_eth_pkt( struct perftest_parameters *user_param,
 
 	DEBUG_LOG(TRACE,">>>>>>%s",__FUNCTION__);
 
-	eth_header = buf;
-
 	if (user_param->tst == BW || user_param->tst == LAT_BY_BW) {
 		/* fill ctx buffer with different packets according to flows_offset */
 		for (i = 0; i < user_param->flows; i++) {
-			print_flag = PRINT_ON;
+			int flow_limit;
+			int print_flag = PRINT_ON;
 			pkt_offset = ctx->flow_buff_size * i; /* update the offset to next flow */
 			flow_limit = ctx->flow_buff_size * (i + 1);
+			// cppcheck-suppress arithOperationsOnVoidPointer
 			eth_header = (void*)buf + pkt_offset;/* update the eth_header to next flow */
 			/* fill ctx buffer with same packets */
 			while ((flow_limit - INC(ctx->size, ctx->cache_line_size)) >= pkt_offset) {
@@ -664,6 +707,7 @@ void create_raw_eth_pkt( struct perftest_parameters *user_param,
 						    print_flag, ctx->size - RAWETH_ADDITION, i);
 				print_flag = PRINT_OFF;
 				pkt_offset += INC(ctx->size, ctx->cache_line_size);/* update the offset to next packet in same flow */
+				// cppcheck-suppress arithOperationsOnVoidPointer
 				eth_header = (void*)buf + pkt_offset;/* update the eth_header to next packet in same flow */
 			}
 		}
@@ -671,6 +715,7 @@ void create_raw_eth_pkt( struct perftest_parameters *user_param,
 		/* fill ctx buffer with different packets according to flows_offset */
 		for (i = 0; i < user_param->flows; i++) {
 			pkt_offset = ctx->flow_buff_size * i;
+			// cppcheck-suppress arithOperationsOnVoidPointer
 			eth_header = (void*)buf + pkt_offset;
 			build_pkt_on_buffer(eth_header, my_dest_info, rem_dest_info,
 					    user_param, eth_type, ip_next_protocol,
@@ -687,40 +732,16 @@ void create_raw_eth_pkt( struct perftest_parameters *user_param,
  ******************************************************************************/
 int calc_flow_rules_size(struct perftest_parameters *user_param, int is_ip_header,int is_udp_header)
 {
-	#ifdef HAVE_RAW_ETH_EXP
-	int tot_size = sizeof(struct ibv_exp_flow_attr);
-	tot_size += sizeof(struct ibv_exp_flow_spec_eth);
-	if (is_ip_header)
-		tot_size += get_ip_size(user_param->raw_ipv6);
-	if (is_udp_header)
-		tot_size += sizeof(struct ibv_exp_flow_spec_tcp_udp);
-	#else
 	int tot_size = sizeof(struct ibv_flow_attr);
 	tot_size += sizeof(struct ibv_flow_spec_eth);
 	if (is_ip_header)
 		tot_size += get_ip_size(user_param->raw_ipv6);
 	if (is_udp_header)
 		tot_size += sizeof(struct ibv_flow_spec_tcp_udp);
-	#endif
 
 	return tot_size;
 }
 
-#ifdef HAVE_RAW_ETH_EXP
-static void fill_ip_common(struct ibv_exp_flow_spec* spec_info,
-			   struct perftest_parameters *user_param)
-{
-	#ifdef HAVE_IPV6
-	struct ibv_exp_flow_spec_ipv6_ext *ipv6_spec = &spec_info->ipv6_ext;
-	static const char ipv6_mask[] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-					 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
-	#endif
-	#ifdef HAVE_IPV4_EXT
-	struct ibv_exp_flow_spec_ipv4_ext *ipv4_spec = &spec_info->ipv4_ext;
-	#else
-	struct ibv_exp_flow_spec_ipv4 *ipv4_spec = &spec_info->ipv4;
-	#endif /* HAVE_IPV4_EXT */
-#else
 static void fill_ip_common(struct ibv_flow_spec* spec_info,
 			   struct perftest_parameters *user_param)
 {
@@ -734,7 +755,6 @@ static void fill_ip_common(struct ibv_flow_spec* spec_info,
 	#else
 	struct ibv_flow_spec_ipv4 *ipv4_spec = &spec_info->ipv4;
 	#endif
-#endif
 
 	if(user_param->machine == SERVER) {
 		if (user_param->raw_ipv6) {
@@ -773,27 +793,6 @@ static void fill_ip_common(struct ibv_flow_spec* spec_info,
 	}
 }
 
-#ifdef HAVE_RAW_ETH_EXP
-static void fill_exp_ip_spec(struct ibv_exp_flow_spec* spec_info,
-			     struct perftest_parameters *user_param)
-{
-	if (user_param->raw_ipv6) {
-		#ifdef HAVE_IPV6
-		spec_info->ipv6.type = IBV_EXP_FLOW_SPEC_IPV6_EXT;
-		spec_info->ipv6.size = sizeof(struct ibv_exp_flow_spec_ipv6_ext);
-		#endif
-	} else {
-		#ifdef HAVE_IPV4_EXT
-		spec_info->ipv4.type = IBV_EXP_FLOW_SPEC_IPV4_EXT;
-		spec_info->ipv4.size = sizeof(struct ibv_exp_flow_spec_ipv4_ext);
-		#else
-		spec_info->ipv4.type = IBV_EXP_FLOW_SPEC_IPV4;
-		spec_info->ipv4.size = sizeof(struct ibv_exp_flow_spec_ipv4);
-		#endif
-	}
-	fill_ip_common(spec_info, user_param);
-}
-#else
 static void fill_ip_spec(struct ibv_flow_spec* spec_info,
 			 struct perftest_parameters *user_param)
 {
@@ -813,26 +812,16 @@ static void fill_ip_spec(struct ibv_flow_spec* spec_info,
 	}
 	fill_ip_common(spec_info, user_param);
 }
-#endif
 
 int set_up_flow_rules(
-		#ifdef HAVE_RAW_ETH_EXP
-		struct ibv_exp_flow_attr **flow_rules,
-		#else
 		struct ibv_flow_attr **flow_rules,
-		#endif
 		struct pingpong_context *ctx,
 		struct perftest_parameters *user_param,
 		int local_port,
 		int remote_port)
 {
-	#ifdef HAVE_RAW_ETH_EXP
-	struct ibv_exp_flow_spec* spec_info;
-	struct ibv_exp_flow_attr* attr_info;
-	#else
 	struct ibv_flow_spec* spec_info;
 	struct ibv_flow_attr* attr_info;
-	#endif
 
 	void* header_buff;
 	int flow_rules_size;
@@ -845,13 +834,8 @@ int set_up_flow_rules(
 
 	memset(header_buff, 0, flow_rules_size);
 
-	#ifdef HAVE_RAW_ETH_EXP
-	*flow_rules = (struct ibv_exp_flow_attr*)header_buff;
-	attr_info = (struct ibv_exp_flow_attr*)header_buff;
-	#else
 	*flow_rules = (struct ibv_flow_attr*)header_buff;
 	attr_info = (struct ibv_flow_attr*)header_buff;
-	#endif
 
 	attr_info->size = flow_rules_size;
 	attr_info->priority = 0;
@@ -859,19 +843,12 @@ int set_up_flow_rules(
 	attr_info->port = user_param->ib_port;
 	attr_info->flags = 0;
 
-	#ifdef HAVE_RAW_ETH_EXP
-	attr_info->type = IBV_EXP_FLOW_ATTR_NORMAL;
-	header_buff = header_buff + sizeof(struct ibv_exp_flow_attr);
-	spec_info = (struct ibv_exp_flow_spec*)header_buff;
-	spec_info->eth.type = IBV_EXP_FLOW_SPEC_ETH;
-	spec_info->eth.size = sizeof(struct ibv_exp_flow_spec_eth);
-	#else
 	attr_info->type = IBV_FLOW_ATTR_NORMAL;
+	// cppcheck-suppress arithOperationsOnVoidPointer
 	header_buff = header_buff + sizeof(struct ibv_flow_attr);
 	spec_info = (struct ibv_flow_spec*)header_buff;
 	spec_info->eth.type = IBV_FLOW_SPEC_ETH;
 	spec_info->eth.size = sizeof(struct ibv_flow_spec_eth);
-	#endif
 
 	spec_info->eth.val.ether_type = 0;
 
@@ -879,39 +856,30 @@ int set_up_flow_rules(
 
 	memset(spec_info->eth.mask.dst_mac, 0xFF,sizeof(spec_info->eth.mask.src_mac));
 	if(user_param->is_server_ip || user_param->is_client_ip) {
-		#ifdef HAVE_RAW_ETH_EXP
-		header_buff = header_buff + sizeof(struct ibv_exp_flow_spec_eth);
-		spec_info = (struct ibv_exp_flow_spec*)header_buff;
-		fill_exp_ip_spec(spec_info, user_param);
-		#else
+		// cppcheck-suppress arithOperationsOnVoidPointer
 		header_buff = header_buff + sizeof(struct ibv_flow_spec_eth);
 		spec_info = (struct ibv_flow_spec*)header_buff;
 		fill_ip_spec(spec_info, user_param);
-		#endif
 	}
 
 	if(user_param->is_server_port && user_param->is_client_port) {
+		// cppcheck-suppress arithOperationsOnVoidPointer
 		header_buff = header_buff + get_ip_size(user_param->raw_ipv6);
-		#ifdef HAVE_RAW_ETH_EXP
-		spec_info = (struct ibv_exp_flow_spec*)header_buff;
-		spec_info->tcp_udp.type = (user_param->tcp) ? IBV_EXP_FLOW_SPEC_TCP : IBV_EXP_FLOW_SPEC_UDP;
-		spec_info->tcp_udp.size = sizeof(struct ibv_exp_flow_spec_tcp_udp);
-		#else
 		spec_info = (struct ibv_flow_spec*)header_buff;
 		spec_info->tcp_udp.type = (user_param->tcp) ? IBV_FLOW_SPEC_TCP : IBV_FLOW_SPEC_UDP;
 		spec_info->tcp_udp.size = sizeof(struct ibv_flow_spec_tcp_udp);
-		#endif
 
 		if(user_param->machine == SERVER) {
 			spec_info->tcp_udp.val.dst_port = htons(local_port);
 			spec_info->tcp_udp.val.src_port = htons(remote_port);
 		} else {
+			//coverity[overrun-local]
 			spec_info->tcp_udp.val.src_port = htons(local_port);
 			spec_info->tcp_udp.val.dst_port = htons(remote_port);
 		}
 
-		memset((void*)&spec_info->tcp_udp.mask.dst_port, 0xFF,sizeof(spec_info->ipv4.mask.dst_ip));
-		memset((void*)&spec_info->tcp_udp.mask.src_port, 0xFF,sizeof(spec_info->ipv4.mask.src_ip));
+		memset((void*)&spec_info->tcp_udp.mask.dst_port, 0xFF, sizeof(spec_info->tcp_udp.mask.dst_port));
+		memset((void*)&spec_info->tcp_udp.mask.src_port, 0xFF, sizeof(spec_info->tcp_udp.mask.src_port));
 	}
 
 	if (user_param->is_ethertype) {
@@ -925,11 +893,7 @@ int set_up_flow_rules(
  *set_fs_rate_rules - init flow struct for FS rate test
  ******************************************************************************/
 int set_up_fs_rules(
-		#ifdef HAVE_RAW_ETH_EXP
-		struct ibv_exp_flow_attr **flow_rules,
-		#else
 		struct ibv_flow_attr **flow_rules,
-		#endif
 		struct pingpong_context *ctx,
 		struct perftest_parameters *user_param,
 		uint64_t allocated_flows) {
@@ -938,7 +902,7 @@ int set_up_fs_rules(
 	int				local_port = 0;
 	int				remote_port = 0;
 	int				last_local_index = 0;
-	int 				flow_index = 0;
+	int 			flow_index;
 	int				qp_index = 0;
 	int				allowed_server_ports = MAX_FS_PORT - user_param->server_port;
 
@@ -966,20 +930,15 @@ int set_up_fs_rules(
  *send_set_up_connection - init raw_ethernet_info and ibv_flow_spec to user args
  ******************************************************************************/
 int send_set_up_connection(
-		#ifdef HAVE_RAW_ETH_EXP
-		struct ibv_exp_flow_attr **flow_rules,
-		#else
 		struct ibv_flow_attr **flow_rules,
-		#endif
 		struct pingpong_context *ctx,
 		struct perftest_parameters *user_param,
 		struct raw_ethernet_info *my_dest_info,
 		struct raw_ethernet_info *rem_dest_info)
 {
 
-	int flow_index;
-
 	if (user_param->machine == SERVER || user_param->duplex) {
+		int flow_index;
 		for (flow_index = 0; flow_index < user_param->flows; flow_index++)
 			set_up_flow_rules(&flow_rules[flow_index], ctx,
 					  user_param, user_param->server_port + flow_index, user_param->client_port + flow_index);
@@ -1046,7 +1005,7 @@ int run_iter_fw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 	uint64_t		totccnt    = 0;
 	uint64_t		totrcnt    = 0;
 	int			i;
-	int			index      = 0;
+	int			index;
 	int			ne = 0;
 	int			err = 0;
 	uint64_t		*rcnt_for_qp = NULL;
@@ -1055,15 +1014,11 @@ int run_iter_fw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 	struct ibv_wc		*wc = NULL;
 	struct ibv_wc		*wc_tx = NULL;
 	struct ibv_recv_wr	*bad_wr_recv = NULL;
-	#if defined(HAVE_VERBS_EXP)
-	struct ibv_exp_send_wr	*bad_exp_wr = NULL;
-	#endif
 	struct ibv_send_wr	*bad_wr = NULL;
 	int			firstRx = 1;
 	int 			rwqe_sent = user_param->rx_depth;
 	int			return_value = 0;
 	int			wc_id;
-
 	ALLOCATE(wc, struct ibv_wc, CTX_POLL_BATCH);
 	ALLOCATE(wc_tx, struct ibv_wc, CTX_POLL_BATCH);
 	ALLOCATE(rcnt_for_qp,uint64_t,user_param->num_of_qps);
@@ -1092,23 +1047,10 @@ int run_iter_fw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 		for (index = 0; index < user_param->num_of_qps; index++) {
 
 			while (((ctx->scnt[index] < iters) || ((firstRx == OFF) && (user_param->test_type == DURATION))) &&
-					((ctx->scnt[index] - ctx->ccnt[index]) < user_param->tx_depth) && (rcnt_for_qp[index] - ctx->scnt[index] > 0)) {
+					((ctx->scnt[index] - ctx->ccnt[index] + user_param->post_list) <= user_param->tx_depth) && (rcnt_for_qp[index] - ctx->scnt[index] > 0)) {
 
 				if (user_param->post_list == 1 && (ctx->scnt[index] % user_param->cq_mod == 0 && user_param->cq_mod > 1)) {
-					#ifdef HAVE_VERBS_EXP
-					#ifdef HAVE_ACCL_VERBS
-					if (user_param->verb_type == ACCL_INTF)
-						ctx->exp_wr[index].exp_send_flags &= ~IBV_EXP_QP_BURST_SIGNALED;
-					else {
-					#endif
-						if (user_param->use_exp == 1)
-							ctx->exp_wr[index].exp_send_flags &= ~IBV_EXP_SEND_SIGNALED;
-						else
-					#endif
-							ctx->wr[index].send_flags &= ~IBV_SEND_SIGNALED;
-					#ifdef HAVE_ACCL_VERBS
-					}
-					#endif
+						ctx->wr[index].send_flags &= ~IBV_SEND_SIGNALED;
 				}
 
 				if (user_param->noPeak == OFF)
@@ -1118,27 +1060,8 @@ int run_iter_fw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 					break;
 				switch_smac_dmac(ctx->wr[index*user_param->post_list].sg_list);
 
-				#ifdef HAVE_VERBS_EXP
-				#ifdef HAVE_ACCL_VERBS
-				if (user_param->verb_type == ACCL_INTF) {
-					struct ibv_sge *sg_l = ctx->exp_wr[index*user_param->post_list].sg_list;
-					err = ctx->qp_burst_family[index]->send_burst(ctx->qp[index], sg_l, 1, ctx->exp_wr[index].exp_send_flags);
-				} else {
-				#endif
-					if (user_param->use_exp == 1) {
-						err = (ctx->exp_post_send_func_pointer)(ctx->qp[index],
-							&ctx->exp_wr[index*user_param->post_list], &bad_exp_wr);
-					}
-					else {
-						err = (ctx->post_send_func_pointer)(ctx->qp[index],
-							&ctx->wr[index*user_param->post_list],&bad_wr);
-					}
-				#ifdef HAVE_ACCL_VERBS
-				}
-				#endif
-				#else
 				err = ibv_post_send(ctx->qp[index], &ctx->wr[index*user_param->post_list], &bad_wr);
-				#endif
+
 				if(err) {
 					fprintf(stderr, "Couldn't post send: qp %d scnt=%lu \n", index, ctx->scnt[index]);
 					return_value = FAILURE;
@@ -1146,13 +1069,6 @@ int run_iter_fw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 				}
 
 				if (user_param->post_list == 1 && user_param->size <= (ctx->cycle_buffer / 2)) {
-					#ifdef HAVE_VERBS_EXP
-					if (user_param->use_exp == 1)
-						increase_loc_addr(ctx->exp_wr[index].sg_list, user_param->size,
-								  ctx->scnt[index], ctx->my_addr[index], 0,
-								  ctx->cache_line_size, ctx->cycle_buffer);
-					else
-					#endif
 						increase_loc_addr(ctx->wr[index].sg_list, user_param->size,
 								  ctx->scnt[index], ctx->my_addr[index], 0,
 								  ctx->cache_line_size, ctx->cycle_buffer);
@@ -1163,20 +1079,7 @@ int run_iter_fw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 				if (user_param->post_list == 1 &&
 					(ctx->scnt[index]%user_param->cq_mod == (user_param->cq_mod - 1) ||
 						(user_param->test_type == ITERATIONS && ctx->scnt[index] == (iters - 1)))) {
-					#ifdef HAVE_VERBS_EXP
-					#ifdef HAVE_ACCL_VERBS
-					if (user_param->verb_type == ACCL_INTF)
-						ctx->exp_wr[index].exp_send_flags |= IBV_EXP_QP_BURST_SIGNALED;
-					else {
-					#endif
-						if (user_param->use_exp == 1)
-							ctx->exp_wr[index].exp_send_flags |= IBV_EXP_SEND_SIGNALED;
-						else
-					#endif
 							ctx->wr[index].send_flags |= IBV_SEND_SIGNALED;
-					#ifdef HAVE_ACCL_VERBS
-					}
-					#endif
 				}
 			}
 		}
@@ -1192,11 +1095,6 @@ int run_iter_fw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 
 		if ((user_param->test_type == ITERATIONS && (totrcnt < tot_iters)) ||
 			(user_param->test_type == DURATION && user_param->state != END_STATE)) {
-			#ifdef HAVE_ACCL_VERBS
-			if (user_param->verb_type == ACCL_INTF)
-				ne = ctx->recv_cq_family->poll_cnt(ctx->recv_cq, CTX_POLL_BATCH);
-			else
-			#endif
 				ne = ibv_poll_cq(ctx->recv_cq, CTX_POLL_BATCH, wc);
 
 			if (ne > 0) {
@@ -1210,13 +1108,10 @@ int run_iter_fw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 				}
 
 				for (i = 0; i < ne; i++) {
-					wc_id = (user_param->verb_type == ACCL_INTF) ?
-						0 : (int)wc[i].wr_id;
+					wc_id = (int)wc[i].wr_id;
 
-					if (user_param->verb_type != ACCL_INTF) {
-						if (wc[i].status != IBV_WC_SUCCESS) {
-							NOTIFY_COMP_ERROR_RECV(wc[i], totrcnt);
-						}
+					if (wc[i].status != IBV_WC_SUCCESS) {
+						NOTIFY_COMP_ERROR_RECV(wc[i], totrcnt);
 					}
 
 					rcnt_for_qp[wc_id]++;
@@ -1229,29 +1124,20 @@ int run_iter_fw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 			}
 		}
 		if ((totccnt < tot_iters) || (user_param->test_type == DURATION && user_param->state != END_STATE)) {
-			#ifdef HAVE_ACCL_VERBS
-			if (user_param->verb_type == ACCL_INTF)
-				ne = ctx->send_cq_family->poll_cnt(ctx->send_cq, CTX_POLL_BATCH);
-			else
-			#endif
-				ne = ibv_poll_cq(ctx->send_cq, CTX_POLL_BATCH, wc_tx);
-
+			ne = ibv_poll_cq(ctx->send_cq, CTX_POLL_BATCH, wc_tx);
 			if (ne > 0) {
 				for (i = 0; i < ne; i++) {
-					wc_id = (user_param->verb_type == ACCL_INTF) ?
-						0 : (int)wc[i].wr_id;
+					wc_id = (int)wc[i].wr_id;
 
-					if (user_param->verb_type != ACCL_INTF) {
-						if (wc_tx[i].status != IBV_WC_SUCCESS)
-							NOTIFY_COMP_ERROR_SEND(wc_tx[i], totscnt, totccnt);
-					}
+					if (wc_tx[i].status != IBV_WC_SUCCESS)
+						NOTIFY_COMP_ERROR_SEND(wc_tx[i], totscnt, totccnt);
 
 					totccnt += user_param->cq_mod;
 					ctx->ccnt[wc_id] += user_param->cq_mod;
 
 					if (user_param->noPeak == OFF) {
 
-						if ((user_param->test_type == ITERATIONS && (totccnt >= tot_iters - 1)))
+						if ((user_param->test_type == ITERATIONS && (totccnt > tot_iters)))
 							user_param->tcompleted[tot_iters - 1] = get_cycles();
 						else
 							user_param->tcompleted[totccnt - 1] = get_cycles();
@@ -1268,23 +1154,11 @@ int run_iter_fw(struct pingpong_context *ctx,struct perftest_parameters *user_pa
 			while (rwqe_sent - totccnt < user_param->rx_depth) {    /* Post more than buffer_size */
 				if (user_param->test_type==DURATION ||
 					rcnt_for_qp[0] + user_param->rx_depth <= user_param->iters) {
-					#ifdef HAVE_ACCL_VERBS
-					if (user_param->verb_type == ACCL_INTF) {
-						if (ctx->qp_burst_family[0]->recv_burst(ctx->qp[0], ctx->rwr[0].sg_list, 1)) {
-							fprintf(stderr, "Couldn't post recv burst (accelerated verbs).\n");
-							return_value = FAILURE;
-							goto cleaning;
-						}
-					} else {
-					#endif
 						if (ibv_post_recv(ctx->qp[0], &ctx->rwr[0], &bad_wr_recv)) {
 							fprintf(stderr, "Couldn't post recv Qp=%d rcnt=%lu\n", 0, rcnt_for_qp[0]);
 							return_value = 15;
 							goto cleaning;
 						}
-					#ifdef HAVE_ACCL_VERBS
-					}
-					#endif
 
 					if (SIZE(user_param->connection_type, user_param->size, !(int)user_param->machine) <= (ctx->cycle_buffer / 2)) {
 						increase_loc_addr(ctx->rwr[0].sg_list,

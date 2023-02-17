@@ -103,6 +103,7 @@
 
 struct perftest_comm {
 	struct pingpong_context    *rdma_ctx;
+	struct counter_context     *counter_ctx;
 	struct perftest_parameters *rdma_params;
 };
 
@@ -129,6 +130,18 @@ double bswap_double(double x);
  * Return Value : SUCCESS,FAILURE.
  */
 int create_comm_struct (struct perftest_comm *comm,
+		struct perftest_parameters *user_param);
+
+
+/* dealloc_comm_struct .
+ *
+ * Description : deallocating the already allocated structs in perftest_comm.
+ *
+ * Parameters :
+ *  comm - A Communication struct.
+ *  user_param -  Perftest parameters.
+ */
+void dealloc_comm_struct(struct perftest_comm *comm,
 		struct perftest_parameters *user_param);
 
 
@@ -407,6 +420,14 @@ void xchg_bw_reports (struct perftest_comm *comm, struct bw_report_data *my_bw_r
  *
  */
 void exchange_versions (struct perftest_comm *user_comm, struct perftest_parameters *user_param);
+
+/* check_version_compatibility.
+ *
+ * Description :
+ * 	Check compatibility between old and new implementation.
+ *
+ */
+void check_version_compatibility(struct perftest_parameters *user_param);
 
 /* check_sys_data.
  *

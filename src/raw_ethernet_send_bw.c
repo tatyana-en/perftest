@@ -37,7 +37,6 @@
 #if defined(__FreeBSD__)
 #include <sys/types.h>
 #include <netinet/in.h>
-#include <netinet/ip.h>
 #endif
 
 #include <stdio.h>
@@ -45,7 +44,7 @@
 #include <string.h>
 #include <signal.h>
 #include <getopt.h>
-#include </usr/include/netinet/ip.h>
+#include <netinet/ip.h>
 #include <poll.h>
 #include "perftest_parameters.h"
 #include "perftest_resources.h"
@@ -67,20 +66,11 @@ int main(int argc, char *argv[])
 	int				ret_parser;
 	struct perftest_parameters	user_param;
 
-	#ifdef HAVE_RAW_ETH_EXP
-	struct ibv_exp_flow		**flow_create_result;
-	struct ibv_exp_flow_attr	**flow_rules;
-	struct ibv_exp_flow 		**flow_promisc = NULL ;
-	#ifdef HAVE_SNIFFER_EXP
-	struct ibv_exp_flow 		**flow_sniffer = NULL;
-	#endif
-	#else
 	struct ibv_flow			**flow_create_result;
 	struct ibv_flow_attr		**flow_rules;
 	struct ibv_flow 		**flow_promisc = NULL ;
 	#ifdef HAVE_SNIFFER
 	struct ibv_flow 		**flow_sniffer = NULL;
-	#endif
 	#endif
 	int 				flow_index, qp_index;
 	union ibv_gid mgid;
@@ -101,30 +91,21 @@ int main(int argc, char *argv[])
 			fprintf(stderr, " Parser function exited with Error\n");
 		}
 		DEBUG_LOG(TRACE,"<<<<<<%s", __FUNCTION__);
-		return FAILURE;
+		goto return_error;
 	}
 
 	/* Allocate user input dependable structs */
-	ALLOCATE(my_dest_info, struct raw_ethernet_info, user_param.num_of_qps);
+	MAIN_ALLOC(my_dest_info, struct raw_ethernet_info, user_param.num_of_qps, return_error);
 	memset(my_dest_info, 0, sizeof(struct raw_ethernet_info) * user_param.num_of_qps);
-	ALLOCATE(rem_dest_info, struct raw_ethernet_info, user_param.num_of_qps);
+	MAIN_ALLOC(rem_dest_info, struct raw_ethernet_info, user_param.num_of_qps, free_my_dest);
 	memset(rem_dest_info, 0, sizeof(struct raw_ethernet_info) * user_param.num_of_qps);
 
-	#ifdef HAVE_RAW_ETH_EXP
-        ALLOCATE(flow_create_result, struct ibv_exp_flow*, user_param.flows * user_param.num_of_qps);
-        ALLOCATE(flow_rules, struct ibv_exp_flow_attr*, user_param.flows * user_param.num_of_qps);
-	#ifdef HAVE_SNIFFER_EXP
-	ALLOCATE(flow_sniffer, struct ibv_exp_flow*, user_param.num_of_qps);
-	#endif
-	ALLOCATE(flow_promisc, struct ibv_exp_flow*, user_param.num_of_qps);
-	#else
-        ALLOCATE(flow_create_result, struct ibv_flow*, user_param.flows * user_param.num_of_qps);
-        ALLOCATE(flow_rules, struct ibv_flow_attr*, user_param.flows * user_param.num_of_qps);
+	MAIN_ALLOC(flow_create_result, struct ibv_flow*, user_param.flows * user_param.num_of_qps, free_rem_dest);
+	MAIN_ALLOC(flow_rules, struct ibv_flow_attr*, user_param.flows * user_param.num_of_qps, free_flow_results);
 	#ifdef HAVE_SNIFFER
-	ALLOCATE(flow_sniffer, struct ibv_flow*, user_param.num_of_qps);
+	MAIN_ALLOC(flow_sniffer, struct ibv_flow*, user_param.num_of_qps, free_flow_rules);
 	#endif
-        ALLOCATE(flow_promisc, struct ibv_flow*, user_param.num_of_qps);
-        #endif
+	MAIN_ALLOC(flow_promisc, struct ibv_flow*, user_param.num_of_qps, free_flow_sniffer);
 
 	if (user_param.raw_mcast) {
 		/* Transform IPv4 to Multicast MAC */
@@ -144,26 +125,16 @@ int main(int argc, char *argv[])
 
 	}
 
-	if (user_param.use_rss) {
-		/* if num_of_qps is not even, set it to 2. */
-		if (user_param.num_of_qps % 2)
-			user_param.num_of_qps = 2;
-
-		/* add another one for rss parent QP */
-		user_param.num_of_qps += 1;
-	}
-
 	/* Finding the IB device selected (or default if no selected). */
-	ib_dev = ctx_find_dev(user_param.ib_devname);
+	ib_dev = ctx_find_dev(&user_param.ib_devname);
 	if (!ib_dev) {
 		fprintf(stderr," Unable to find the Infiniband/RoCE device\n");
 		DEBUG_LOG(TRACE, "<<<<<<%s", __FUNCTION__);
-		return FAILURE;
+		goto free_mem;
 	}
-	GET_STRING(user_param.ib_devname, ibv_get_device_name(ib_dev));
 
 	if (check_flow_steering_support(user_param.ib_devname)) {
-		return FAILURE;
+		goto free_devname;
 	}
 
 	/* Getting the relevant context from the device */
@@ -171,31 +142,35 @@ int main(int argc, char *argv[])
 	if (!ctx.context) {
 		fprintf(stderr, " Couldn't get context for the device\n");
 		DEBUG_LOG(TRACE, "<<<<<<%s", __FUNCTION__);
-		return FAILURE;
+		goto free_devname;
 	}
 
 	/* Verify user parameters that require the device context,
 	 * the function will print the relevent error info. */
 	if (verify_params_with_device_context(ctx.context, &user_param)) {
-		return FAILURE;
+		goto free_devname;
 	}
 
 	/* See if MTU and link type are valid and supported. */
 	if (check_link_and_mtu(ctx.context, &user_param)) {
 		fprintf(stderr, " Couldn't get context for the device\n");
 		DEBUG_LOG(TRACE, "<<<<<<%s", __FUNCTION__);
-		return FAILURE;
+		goto free_devname;
 	}
 
 	/* Allocating arrays needed for the test. */
-	alloc_ctx(&ctx, &user_param);
+	if (alloc_ctx(&ctx,&user_param)){
+		fprintf(stderr, "Couldn't allocate context\n");
+		goto free_devname;
+	}
 
 	/* set mac address by user choose */
 	for (qp_index = 0; qp_index < user_param.num_of_qps; qp_index++) {
 		if (send_set_up_connection(&flow_rules[qp_index * user_param.flows],
 						&ctx, &user_param, &my_dest_info[qp_index], &rem_dest_info[qp_index])) {
 			fprintf(stderr, " Unable to set up socket connection\n");
-			return FAILURE;
+			dealloc_ctx(&ctx, &user_param);
+			goto free_devname;
 		}
 	}
 
@@ -210,7 +185,8 @@ int main(int argc, char *argv[])
 	/* create all the basic IB resources (data buffer, PD, MR, CQ and events channel) */
 	if (ctx_init(&ctx, &user_param)) {
 		fprintf(stderr, " Couldn't create IB resources\n");
-		return FAILURE;
+		dealloc_ctx(&ctx, &user_param);
+		goto free_devname;
 	}
 
 	/* build raw Ethernet packets on ctx buffer */
@@ -223,41 +199,25 @@ int main(int argc, char *argv[])
 	/* create flow rules for servers/duplex clients ,  that not test raw_mcast */
 	if (!user_param.raw_mcast && (user_param.machine == SERVER || user_param.duplex)) {
 
-		/* attaching the qp to the spec */
-		for (qp_index = 0; qp_index < user_param.num_of_qps; qp_index++) {
-			for (flow_index = 0; flow_index < user_param.flows; flow_index++) {
-				#ifdef HAVE_RAW_ETH_EXP
-				flow_create_result[flow_index + qp_index * user_param.flows] =
-					ibv_exp_create_flow(ctx.qp[qp_index], flow_rules[flow_index]);
-				#else
-				flow_create_result[flow_index + qp_index * user_param.flows] =
-					ibv_create_flow(ctx.qp[qp_index], flow_rules[(qp_index * user_param.flows) + flow_index]);
-				#endif
-
-				if (!flow_create_result[flow_index + qp_index * user_param.flows]){
-					perror("error");
-					fprintf(stderr, "Couldn't attach QP\n");
-					return FAILURE;
-				}
-			}
-		}
-
-		if (user_param.use_promiscuous) {
-			#ifdef HAVE_RAW_ETH_EXP
-			struct ibv_exp_flow_attr attr = {
-				.type = IBV_EXP_FLOW_ATTR_ALL_DEFAULT,
+		#if defined HAVE_SNIFFER
+		if (user_param.use_sniffer) {
+			struct ibv_flow_attr attr = {
+				.type = IBV_FLOW_ATTR_SNIFFER,
 				.num_of_specs = 0,
 				.port = user_param.ib_port,
 				.flags = 0
 			};
 
 			for (qp_index = 0; qp_index < user_param.num_of_qps; qp_index++) {
-				if ((flow_promisc[qp_index] = ibv_exp_create_flow(ctx.qp[qp_index], &attr)) == NULL) {
+				if ((flow_sniffer[qp_index] = ibv_create_flow(ctx.qp[qp_index], &attr)) == NULL) {
 					perror("error");
-					fprintf(stderr, "Couldn't attach promiscuous rule QP\n");
+					fprintf(stderr, "Couldn't attach SNIFFER rule QP\n");
 				}
 			}
-			#else
+		}
+		#endif /* HAVE_SNIFFER */
+
+			if (user_param.use_promiscuous) {
 			struct ibv_flow_attr attr = {
 				.type = IBV_FLOW_ATTR_ALL_DEFAULT,
 				.num_of_specs = 0,
@@ -271,45 +231,28 @@ int main(int argc, char *argv[])
 					fprintf(stderr, "Couldn't attach promiscuous rule QP\n");
 				}
 			}
-			#endif
 		}
-		#if defined HAVE_SNIFFER || defined HAVE_SNIFFER_EXP
-		if (user_param.use_sniffer) {
-			#ifdef HAVE_RAW_ETH_EXP
-			struct ibv_exp_flow_attr attr = {
-				.type = IBV_EXP_FLOW_ATTR_SNIFFER,
-				.num_of_specs = 0,
-				.port = user_param.ib_port,
-				.flags = 0
-			};
-			#else
-			struct ibv_flow_attr attr = {
-				.type = IBV_FLOW_ATTR_SNIFFER,
-				.num_of_specs = 0,
-				.port = user_param.ib_port,
-				.flags = 0
-			};
-			#endif
 
-			for (qp_index = 0; qp_index < user_param.num_of_qps; qp_index++) {
-				#ifdef HAVE_RAW_ETH_EXP
-				if ((flow_sniffer[qp_index] = ibv_exp_create_flow(ctx.qp[qp_index], &attr)) == NULL) {
-				#else
-				if ((flow_sniffer[qp_index] = ibv_create_flow(ctx.qp[qp_index], &attr)) == NULL) {
-				#endif
+		/* attaching the qp to the spec */
+		for (qp_index = 0; qp_index < user_param.num_of_qps; qp_index++) {
+			for (flow_index = 0; flow_index < user_param.flows; flow_index++) {
+				flow_create_result[flow_index + qp_index * user_param.flows] =
+					ibv_create_flow(ctx.qp[qp_index], flow_rules[(qp_index * user_param.flows) + flow_index]);
+
+				if (!flow_create_result[flow_index + qp_index * user_param.flows]){
 					perror("error");
-					fprintf(stderr, "Couldn't attach SNIFFER rule QP\n");
+					fprintf(stderr, "Couldn't attach QP\n");
+					goto promisc_flow_destroy;
 				}
 			}
 		}
-		#endif /* HAVE_SNIFFER */
 	}
 
 	/* Prepare IB resources for rtr/rts. */
 	if (ctx_connect(&ctx, NULL, &user_param, NULL)) {
 		fprintf(stderr, " Unable to Connect the HCA's through the link\n");
 		DEBUG_LOG(TRACE, "<<<<<<%s", __FUNCTION__);
-		return FAILURE;
+		goto destroy_ctx;
 	}
 
 	if (user_param.raw_mcast) {
@@ -348,7 +291,7 @@ int main(int argc, char *argv[])
 			if (ctx_set_recv_wqes(&ctx, &user_param)) {
 				fprintf(stderr," Failed to post receive recv_wqes\n");
 				DEBUG_LOG(TRACE, "<<<<<<%s", __FUNCTION__);
-				return FAILURE;
+				goto free_devname;
 			}
 		}
 
@@ -356,28 +299,28 @@ int main(int argc, char *argv[])
 
 			if(run_iter_fw(&ctx, &user_param)) {
 				DEBUG_LOG(TRACE, "<<<<<<%s", __FUNCTION__);
-				return FAILURE;
+				goto free_devname;
 			}
 
 		} else if (user_param.duplex) {
 
 			if(run_iter_bi(&ctx, &user_param)) {
 				DEBUG_LOG(TRACE, "<<<<<<%s", __FUNCTION__);
-				return FAILURE;
+				goto free_devname;
 			}
 
 		} else if (user_param.machine == CLIENT) {
 
 			if(run_iter_bw(&ctx, &user_param)) {
 				DEBUG_LOG(TRACE, "<<<<<<%s", __FUNCTION__);
-				return FAILURE;
+				goto free_devname;
 			}
 
 		} else {
 
 			if(run_iter_bw_server(&ctx, &user_param)) {
 				DEBUG_LOG(TRACE, "<<<<<<%s", __FUNCTION__);
-				return FAILURE;
+				goto free_devname;
 			}
 		}
 
@@ -391,22 +334,21 @@ int main(int argc, char *argv[])
 
 			if (ctx_set_recv_wqes(&ctx, &user_param)) {
 				fprintf(stderr, "Failed to post receive recv_wqes\n");
-				return FAILURE;
+				goto free_devname;
 			}
 		}
-
 		if (user_param.machine == CLIENT) {
 
 			if(run_iter_bw_infinitely(&ctx, &user_param)) {
 				fprintf(stderr, " Error occurred while running infinitely! aborting ...\n");
-				return FAILURE;
+				goto free_devname;
 			}
 
 		} else if (user_param.machine == SERVER) {
 
 			if(run_iter_bw_infinitely_server(&ctx, &user_param)) {
 				fprintf(stderr, " Error occurred while running infinitely on server! aborting ...\n");
-				return FAILURE;
+				goto free_devname;
 			}
 		}
 	}
@@ -415,48 +357,33 @@ int main(int argc, char *argv[])
 		/* destroy open flows */
 		for (flow_index = 0; flow_index < user_param.flows; flow_index++) {
 			for (qp_index = 0; qp_index < user_param.num_of_qps; qp_index++) {
-				#ifdef HAVE_RAW_ETH_EXP
-				if (ibv_exp_destroy_flow(flow_create_result[flow_index + qp_index * user_param.flows])) {
-				#else
 				if (ibv_destroy_flow(flow_create_result[flow_index + qp_index * user_param.flows])) {
-				#endif
 					perror("error");
 					fprintf(stderr, "Couldn't destroy flow\n");
-					return FAILURE;
+					goto promisc_flow_destroy;
 				}
 			}
 		}
-		free(flow_rules);
 
 		if (user_param.use_promiscuous) {
 			for (qp_index = 0; qp_index < user_param.num_of_qps; qp_index++) {
-				#ifdef HAVE_RAW_ETH_EXP
-				if (ibv_exp_destroy_flow(flow_promisc[qp_index])) {
-				#else
 				if (ibv_destroy_flow(flow_promisc[qp_index])) {
-				#endif
 					perror("error");
 					fprintf(stderr, "Couldn't destroy flow\n");
-					return FAILURE;
+					goto sniffer_flow_destroy;
 				}
 			}
-			free(flow_promisc);
 		}
 
-		#if defined HAVE_SNIFFER || defined HAVE_SNIFFER_EXP
+		#if defined HAVE_SNIFFER
 		if (user_param.use_sniffer) {
 			for (qp_index = 0; qp_index < user_param.num_of_qps; qp_index++) {
-				#ifdef HAVE_RAW_ETH_EXP
-				if (ibv_exp_destroy_flow(flow_sniffer[qp_index])) {
-				#else
 				if (ibv_destroy_flow(flow_sniffer[qp_index])) {
-				#endif
 					perror("error");
 					fprintf(stderr, "Couldn't destroy sniffer flow\n");
-					return FAILURE;
+					goto destroy_ctx;
 				}
 			}
-			free(flow_sniffer);
 		}
 		#endif
 
@@ -473,11 +400,17 @@ int main(int argc, char *argv[])
 	if (destroy_ctx(&ctx, &user_param)) {
 		fprintf(stderr, "Failed to destroy_ctx\n");
 		DEBUG_LOG(TRACE, "<<<<<<%s", __FUNCTION__);
-		return FAILURE;
+		goto free_mem;
 	}
 
 	free(my_dest_info);
 	free(rem_dest_info);
+	free(flow_rules);
+	free(flow_promisc);
+	#if defined HAVE_SNIFFER
+	free(flow_sniffer);
+	#endif
+	free(user_param.ib_devname);
 
 	/* limit verifier */
 	if (!user_param.is_bw_limit_passed && (user_param.is_limit_bw == ON ) ) {
@@ -490,4 +423,47 @@ int main(int argc, char *argv[])
 
 	DEBUG_LOG(TRACE, "<<<<<<%s", __FUNCTION__);
 	return SUCCESS;
+
+
+promisc_flow_destroy:
+	if (user_param.use_promiscuous) {
+		for (qp_index = 0; qp_index < user_param.num_of_qps; qp_index++) {
+			if (ibv_destroy_flow(flow_promisc[qp_index])) {
+				perror("error");
+				fprintf(stderr, "Couldn't destroy flow\n");
+				}
+			}
+		}
+sniffer_flow_destroy: __attribute__((unused))
+	#if defined HAVE_SNIFFER
+	if (user_param.use_sniffer) {
+		for (qp_index = 0; qp_index < user_param.num_of_qps; qp_index++) {
+			if ((ibv_destroy_flow(flow_sniffer[qp_index]))) {
+				perror("error");
+				fprintf(stderr, "Couldn't attach SNIFFER rule QP\n");
+			}
+		}
+	}
+	#endif
+destroy_ctx:  __attribute__((unused))
+	destroy_ctx(&ctx, &user_param);
+free_devname:
+	free(user_param.ib_devname);
+free_mem:
+	free(flow_promisc);
+free_flow_sniffer: __attribute__((unused))
+	#if defined HAVE_SNIFFER
+	free(flow_sniffer);
+	#endif
+// cppcheck-suppress unusedLabelConfiguration
+free_flow_rules:
+	free(flow_rules);
+free_flow_results:
+	free(flow_create_result);
+free_rem_dest:
+	free(rem_dest_info);
+free_my_dest:
+	free(my_dest_info);
+return_error:
+	return FAILURE;
 }

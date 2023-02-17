@@ -1,6 +1,6 @@
 Name:           perftest
 Summary:        IB Performance tests
-Version:        4.4
+Version:        23.04.0
 Release:        0.0
 License:        BSD 3-Clause, GPL v2 or later
 Group:          Productivity/Networking/Diagnostic
@@ -8,6 +8,7 @@ Source:         http://www.openfabrics.org/downloads/%{name}-%{version}.tar.gz
 Url:            http://www.openfabrics.org
 BuildRoot:      %{_tmppath}/%{name}-%{version}-build
 BuildRequires:  libibverbs-devel librdmacm-devel libibumad-devel
+BuildRequires:  pciutils-devel
 
 %description
 gen3 uverbs microbenchmarks
@@ -16,7 +17,10 @@ gen3 uverbs microbenchmarks
 %setup -q
 
 %build
-%configure
+%configure \
+%if %{?_cuda_h_path:1}0
+        CUDA_H_PATH=%{_cuda_h_path}
+%endif
 %{__make}
 chmod -x runme
 
@@ -31,6 +35,7 @@ rm -rf ${RPM_BUILD_ROOT}
 %defattr(-, root, root)
 %doc README COPYING runme
 %_bindir/*
+%_mandir/man1/*.1*
 
 %changelog
 * Wed Jan 09 2013 - idos@mellanox.com

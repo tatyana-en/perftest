@@ -52,6 +52,9 @@
 #define PERFTEST_RESOURCES_H
 
 #include <infiniband/verbs.h>
+#if defined(HAVE_MLX5DV)
+#include <infiniband/mlx5dv.h>
+#endif
 #include <rdma/rdma_cma.h>
 #include <stdint.h>
 #if defined(__FreeBSD__)
@@ -77,6 +80,7 @@
 #define PL			(1)
 #define ATOMIC_ADD_VALUE	(1)
 #define ATOMIC_SWAP_VALUE	(0)
+#define MIN_RNR_TIMER		(12)
 
 /* Space for GRH when we scatter the packet in UD. */
 #define PINGPONG_SEND_WRID	(60)
@@ -115,13 +119,16 @@
 /* UD addition to the buffer. */
 #define IF_UD_ADD(type,cache_line_size) ((type == UD) ? (cache_line_size) : (0))
 
+#define ROUND_UP(value, alignment) (((value) % (alignment) == 0) ?  \
+		(value) : ((alignment) * ((value) / (alignment) + 1)))
+
 /* Macro that defines the address where we write in RDMA.
  * If message size is smaller then CACHE_LINE size then we write in CACHE_LINE jumps.
  */
-#define INC(size,cache_line_size) ((size > cache_line_size) ? ((size%cache_line_size == 0) ?  \
-	       (size) : (cache_line_size*(size/cache_line_size+1))) : (cache_line_size))
+#define INC(size, cache_line_size) ((size > cache_line_size) ? \
+		ROUND_UP(size, cache_line_size) : (cache_line_size))
 
-#define UD_MSG_2_EXP(size) ((log(size))/(log(2)))
+#define MSG_SZ_2_EXP(size) ((log(size)) / (log(2)))
 
 #define MASK_IS_SET(mask, attr)      (((mask)&(attr))!=0)
 
@@ -154,14 +161,32 @@ struct pingpong_context {
 	struct rdma_cm_id			*cm_id_control;
 	struct rdma_cm_id			*cm_id;
 	struct ibv_context			*context;
+	#ifdef HAVE_AES_XTS
+	struct mlx5dv_mkey			**mkey;
+	struct mlx5dv_dek			**dek;
+	#endif
 	struct ibv_comp_channel			*channel;
 	struct ibv_pd				*pd;
 	struct ibv_mr				**mr;
 	struct ibv_cq				*send_cq;
 	struct ibv_cq				*recv_cq;
 	void					**buf;
+	#ifdef HAVE_CUDA
+	#ifdef HAVE_CUDA_DMABUF
+	int					*cuda_buf_dmabuf_fd;
+	uint64_t				*cuda_buf_dmabuf_offset;
+	#endif
+	#endif
 	struct ibv_ah				**ah;
 	struct ibv_qp				**qp;
+	#ifdef HAVE_IBV_WR_API
+	struct ibv_qp_ex			**qpx;
+	#ifdef HAVE_MLX5DV
+	struct mlx5dv_qp_ex			**dv_qp;
+	#endif
+	int (*new_post_send_work_request_func_pointer) (struct pingpong_context *ctx, int index,
+		struct perftest_parameters *user_param);
+	#endif
 	struct ibv_srq				*srq;
 	struct ibv_sge				*sge_list;
 	struct ibv_sge				*recv_sge_list;
@@ -171,6 +196,7 @@ struct pingpong_context {
 	uint64_t				*my_addr;
 	uint64_t				*rx_buffer_addr;
 	uint64_t				*rem_addr;
+	uint32_t 				*rem_qpn;
 	uint64_t				buff_size;
 	uint64_t				send_qp_buff_size;
 	uint64_t				flow_buff_size;
@@ -179,6 +205,9 @@ struct pingpong_context {
 	uint64_t				*scnt;
 	uint64_t				*ccnt;
 	int					is_contig_supported;
+	uint32_t				*r_dctn;
+	uint32_t				*dci_stream_id;
+	int 					dek_number;
 	uint32_t                                *ctrl_buf;
 	uint32_t                                *credit_buf;
 	struct ibv_mr                           *credit_mr;
@@ -188,24 +217,11 @@ struct pingpong_context {
 	int                                     credit_cnt;
 	int					cache_line_size;
 	int					cycle_buffer;
+	int					rposted;
 	#ifdef HAVE_XRCD
 	struct ibv_xrcd				*xrc_domain;
 	int 					fd;
 	#endif
-	#if defined(HAVE_VERBS_EXP)
-        drv_exp_post_send_func			exp_post_send_func_pointer;
-        drv_post_send_func			post_send_func_pointer;
-	drv_poll_cq_func			poll_cq_func_pointer;
-	struct ibv_exp_dct			**dct;
-	struct ibv_exp_send_wr			*exp_wr;
-	#endif
-	#ifdef HAVE_ACCL_VERBS
-	struct ibv_exp_res_domain		*res_domain;
-	struct ibv_exp_cq_family		*send_cq_family;
-	struct ibv_exp_cq_family		*recv_cq_family;
-	struct ibv_exp_qp_burst_family		**qp_burst_family;
-	#endif
-
 };
 
  struct pingpong_dest {
@@ -244,7 +260,8 @@ int check_add_port(char **service,int port,
 /* ctx_find_dev
  *
  * Description : Returns the device corresponding to ib_devname
- *	or the first one found , in case ib_devname == NULL
+ *	or the first one found , in case ib_devname == NULL.
+ *	Also sets the actual device name selected.
  *
  * Parameters :
  *
@@ -252,7 +269,23 @@ int check_add_port(char **service,int port,
  *
  * Return Value : the device or NULL in case of failure.
  */
-struct ibv_device* ctx_find_dev(const char *ib_devname);
+struct ibv_device* ctx_find_dev(char **ib_devname);
+
+/* ctx_open_device
+ *
+ * Description : Open context for the device ib_dev
+ *  and returns pointer to the context , in case
+ *  of can't open a context the functions return NULL.
+ *
+ * Parameters :
+ *
+ *  ib_dev - The device to open context for.
+ * 	user_param - the perftest parameters.
+ *
+ * Return Value : the context or NULL in case of failure.
+ */
+struct ibv_context* ctx_open_device(struct ibv_device *ib_dev,
+					struct perftest_parameters *user_param);
 
 /* create_rdma_resources
  *
@@ -287,8 +320,20 @@ int destroy_rdma_resources(struct pingpong_context *ctx,
  * Parameters :
  *	ctx - Resources sructure.
  * 	user_param - the perftest parameters.
+ *
+ * Return Value : SUCCESS, FAILURE.
  */
-void alloc_ctx(struct pingpong_context *ctx,struct perftest_parameters *user_param);
+int alloc_ctx(struct pingpong_context *ctx,struct perftest_parameters *user_param);
+
+/* dealloc_ctx
+ *
+ * Description : Deallocate the perftest allocated arrays only.
+ *
+ * Parameters :
+ *	ctx - Resources sructure.
+ * 	user_param - the perftest parameters.
+ */
+void dealloc_ctx(struct pingpong_context *ctx,struct perftest_parameters *user_param);
 
 /* destroy_ctx
  *
@@ -332,6 +377,34 @@ int verify_params_with_device_context(struct ibv_context *ctx,
  */
 int ctx_init(struct pingpong_context *ctx,struct perftest_parameters *user_param);
 
+#ifdef HAVE_AES_XTS
+/* set_valid_cred
+ *
+ * Description :
+ * 		Read the credentials from a file that the user wrote them in
+ * 		and assign the credentials to the array that is given to the function.
+ *
+ * Parameters:
+ *  dst - Array to put the cred in.
+ *  user_param  - The perftest parameters.
+ * Return Value : SUCCESS, FAILURE
+ */
+int set_valid_cred(char *dst, struct perftest_parameters *user_param);
+
+/* set_valid_dek
+ *
+ * Description :
+ * 		Calls a script that generate data encryption key
+ * 		and assign the data encryption key value to dst.
+ *
+ * Parameters:
+ *  dst - Array to put the data encryption key in.
+ *  user_param  - The perftest parameters.
+ * Return Value : SUCCESS, FAILURE
+ */
+int set_valid_dek(char *dst, struct perftest_parameters *user_param);
+#endif
+
 /* ctx_qp_create.
  *
  * Description :
@@ -341,15 +414,14 @@ int ctx_init(struct pingpong_context *ctx,struct perftest_parameters *user_param
  *
  * Parameters :
  *
- *	pd      - The Protection domain , each the qp will be assigned to.
- *	send_cq - The CQ that will produce send CQE.
- *	recv_qp - The CQ that will produce recv CQE.
- *	param   - The parameters for the QP.
+ *	ctx - QP context.
+ *	user_param  - The perftest parameters.
+ *	qp_index   - The qp number to create.
  *
  * Return Value : Adress of the new QP.
  */
 struct ibv_qp* ctx_qp_create(struct pingpong_context *ctx,
-							 struct perftest_parameters *user_param);
+			struct perftest_parameters *user_param, int qp_index);
 
 /* ctx_modify_qp_to_init.
  *
@@ -361,12 +433,13 @@ struct ibv_qp* ctx_qp_create(struct pingpong_context *ctx,
  * Parameters :
  *
  *	qp     - The QP that will be moved to INIT.
- *	param  - The parameters for the QP.
+ *	user_param  - The perftest parameters.
+ *	qp_index   - The qp number to create.
  *
  * Return Value : SUCCESS, FAILURE.
  *
  */
-int ctx_modify_qp_to_init(struct ibv_qp *qp,struct perftest_parameters *user_param, uint64_t init_flag);
+int ctx_modify_qp_to_init(struct ibv_qp *qp,struct perftest_parameters *user_param, int qp_index);
 
 /* ctx_connect.
  *
@@ -388,24 +461,6 @@ int ctx_connect(struct pingpong_context *ctx,
 				struct pingpong_dest *dest,
 				struct perftest_parameters *user_param,
 				struct pingpong_dest *my_dest);
-
-/* ctx_set_send_exp_wqes.
- *
- * Description :
- *
- *	Prepare the exp send work request templates for all QPs
- *
- * Parameters :
- *
- *	ctx     - Test Context.
- *	user_param  - user_parameters struct for this test.
- *  rem_dest   - pingpong_dest struct of the remote side.
- *
- */
-void ctx_set_send_exp_wqes(struct pingpong_context *ctx,
-					   struct perftest_parameters *user_param,
-					   struct pingpong_dest *rem_dest);
-
 
 /* ctx_set_send_regwqes.
  *
@@ -667,6 +722,7 @@ static __inline int ctx_notify_events(struct ibv_comp_channel *channel)
 		return 1;
 	}
 
+	//coverity[uninit_use_in_call]
 	ibv_ack_cq_events(ev_cq,1);
 
 	if (ibv_req_notify_cq(ev_cq, 0)) {
@@ -676,25 +732,6 @@ static __inline int ctx_notify_events(struct ibv_comp_channel *channel)
 	return 0;
 }
 
-#if defined(HAVE_VERBS_EXP)
-static __inline void increase_exp_rem_addr(struct ibv_exp_send_wr *wr,int size,uint64_t scnt,uint64_t prim_addr,VerbType verb, int cache_line_size, int cycle_buffer)
-{
-	if (verb == ATOMIC)
-		wr->wr.atomic.remote_addr += INC(size,cache_line_size);
-
-	else
-		wr->wr.rdma.remote_addr += INC(size,cache_line_size);
-
-	if ( ((scnt+1) % (cycle_buffer/ INC(size,cache_line_size))) == 0) {
-
-		if (verb == ATOMIC)
-			wr->wr.atomic.remote_addr = prim_addr;
-
-		else
-			wr->wr.rdma.remote_addr = prim_addr;
-	}
-}
-#endif
 static __inline void increase_rem_addr(struct ibv_send_wr *wr,int size,uint64_t scnt,uint64_t prim_addr,VerbType verb, int cache_line_size, int cycle_buffer)
 {
 	if (verb == ATOMIC)
@@ -749,78 +786,29 @@ void catch_alarm(int sig);
 
 void check_alive(int sig);
 
-/* catch_alarm.
- *
- * Description :
- * 	Signal catcher for run_infinitely feature.
- *  Will be triggered every 5 sec and measure BW in this time frame.
- *
- */
-void catch_alarm_infintely();
+void print_bw_infinite_mode();
 
 /* handle_signal_print_thread
 *
 * Description :
-* 	Handle thread creation for signal catching in run_infinitely mode
-*
-*/
-void *handle_signal_print_thread(void *sig_mask);
-
-/* ctx_modify_dc_qp_to_init.
- *
- * Description :
- *
- *	Modifies the given QP to INIT state , according to attributes in param.
- *  The relevent attributes are ib_port, connection_type and verb.
- *
- * Parameters :
- *
- *	qp     - The QP that will be moved to INIT.
- *	param  - The parameters for the QP.
- *
- * Return Value : SUCCESS, FAILURE.
- *
- */
-int ctx_modify_dc_qp_to_init(struct ibv_qp *qp,struct perftest_parameters *user_param);
+* 	Handle thread creation for printing data in run_infinitely mode
+**/
+void *handle_signal_print_thread(void* duration);
 
 int perform_warm_up(struct pingpong_context *ctx,struct perftest_parameters *user_param);
 
-#ifdef HAVE_MASKED_ATOMICS
-struct ibv_qp* ctx_atomic_qp_create(struct pingpong_context *ctx,
-					struct perftest_parameters *user_param);
-int check_masked_atomics_support(struct pingpong_context *ctx);
-#endif
-
-#if defined (HAVE_PACKET_PACING_EXP) || defined (HAVE_PACKET_PACING)
+#if defined (HAVE_PACKET_PACING)
 int check_packet_pacing_support(struct pingpong_context *ctx);
-#if defined (HAVE_PACKET_PACING_EXTENSION_EXP)
-int check_packet_pacing_extension_support(struct pingpong_context *ctx);
-#endif
-#endif
-
-#ifdef HAVE_ACCL_VERBS
-struct ibv_exp_res_domain* create_res_domain(struct pingpong_context *ctx,
-						struct perftest_parameters *user_param);
 #endif
 
 int create_reg_qp_main(struct pingpong_context *ctx,
-		struct perftest_parameters *user_param, int i, int num_of_qps);
-
-#ifdef HAVE_VERBS_EXP
-int create_exp_qp_main(struct pingpong_context *ctx,
-		struct perftest_parameters *user_param, int i, int num_of_qps);
-#endif
+		struct perftest_parameters *user_param, int i);
 
 int create_qp_main(struct pingpong_context *ctx,
-		struct perftest_parameters *user_param, int i, int num_of_qps);
-
-#ifdef HAVE_VERBS_EXP
-struct ibv_qp* ctx_exp_qp_create(struct pingpong_context *ctx,
-		struct perftest_parameters *user_param, int qp_index);
-#endif
+		struct perftest_parameters *user_param, int i);
 
 int modify_qp_to_init(struct pingpong_context *ctx,
-                struct perftest_parameters *user_param, int qp_index, int num_of_qps);
+        struct perftest_parameters *user_param, int qp_index);
 
 
 /* create_single_mr

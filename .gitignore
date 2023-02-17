@@ -25,7 +25,6 @@ config.h
 config.h.in
 config.log
 config.status
-config/
 configure
 libtool
 m4/
@@ -49,6 +48,8 @@ ib_write_bw
 ib_write_lat
 raw_ethernet_bw
 raw_ethernet_lat
+raw_ethernet_burst_lat
+raw_ethernet_fs_rate
 
 #Debian Stuff
 debian/compat

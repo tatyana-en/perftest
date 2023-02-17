@@ -55,21 +55,23 @@
 
 #include <infiniband/verbs.h>
 #include <unistd.h>
+#include <inttypes.h>
 #if !defined(__FreeBSD__)
 #include <malloc.h>
 #endif
 #include "get_clock.h"
+#include "perftest_counters.h"
 
 #ifdef HAVE_CONFIG_H
 #include <config.h>
 #endif
 
-#ifdef HAVE_VERBS_EXP
-#include <infiniband/verbs_exp.h>
-#endif
-
 #ifdef HAVE_CUDA
 #include CUDA_PATH
+#endif
+
+#ifdef HAVE_ROCM
+#include <hip/hip_runtime_api.h>
 #endif
 
 /* Connection types available. */
@@ -79,6 +81,7 @@
 #define RawEth  (3)
 #define XRC (4)
 #define DC  (5)
+#define SRD (6)
 
 /* Genral control definitions */
 #define OFF	     (0)
@@ -127,6 +130,8 @@
 #define DEF_PAGE_SIZE (4096)
 #define DEF_FLOWS (1)
 #define RATE_VALUES_COUNT (18)
+#define DISABLED_CQ_MOD_VALUE    (1)
+#define MSG_SIZE_CQ_MOD_LIMIT (8192)
 
 /* Optimal Values for Inline */
 #define DEF_INLINE_WRITE (220)
@@ -134,6 +139,21 @@
 #define DEF_INLINE_SEND_XRC (236)
 #define DEF_INLINE_SEND_UD (188)
 #define DEF_INLINE_DC (150)
+#define DEF_INLINE_SEND_RC_UC_XRC (236)
+
+/* AES-XTS Values */
+#define AES_XTS_TWEAK_SIZE (16)
+#define AES_XTS_KEYTAG_SIZE (8)
+#define AES_XTS_INLINE (512)
+#define AES_XTS_CREDENTIALS_SIZE (48)
+#define AES_XTS_DEK_SIZE (40)
+#define AES_XTS_BLOCK_SIZE_512 (512)
+#define AES_XTS_BLOCK_SIZE_520 (520)
+#define AES_XTS_BLOCK_SIZE_4048 (4048)
+#define AES_XTS_BLOCK_SIZE_4096 (4096)
+#define AES_XTS_BLOCK_SIZE_4160 (4160)
+#define AES_XTS_DEK_FILE_NAME_SIZE (12)
+#define AES_XTS_BLOCK_ARRAY_SIZE (5)
 
 /* Max and Min allowed values for perftest parameters. */
 #define MIN_TOS		(0)
@@ -141,7 +161,6 @@
 #define MIN_HOP_LIMIT	(0)
 #define MAX_HOP_LIMIT	(255)
 #define MIN_IB_PORT   (1)
-#define MAX_IB_PORT   (3)
 #define MIN_ITER      (5)
 #define MAX_ITER      (100000000)
 #define MIN_TX 	      (1)
@@ -159,8 +178,8 @@
 #define UC_MAX_RX     (16000)
 #define MIN_CQ_MOD    (1)
 #define MAX_CQ_MOD    (1024)
-#define MAX_INLINE    (912)
-#define MAX_INLINE_UD (884)
+#define MAX_INLINE    (1024)
+#define MAX_INLINE_UD (1024)
 #define MIN_EQ_NUM    (0)
 #define MAX_EQ_NUM    (2048)
 
@@ -203,34 +222,94 @@
 #define RESULT_FMT_FS_RATE_DUR " #flows		fs_avg_time[usec]    	fps[flow per sec]"
 
 /* Result print format */
-#define REPORT_FMT     " %-7lu    %-10lu       %-7.2lf            %-7.2lf		   %-7.6lf"
+#define REPORT_FMT " %-7lu    %-10" PRIu64 "       %-7.2lf            %-7.2lf		   %-7.6lf"
 
-#define REPORT_FMT_EXT     " %-7lu    %lu           %-7.6lf            %-7.6lf            %-7.6lf"
+#define REPORT_FMT_JSON "MsgSize: %lu,\nn_iterations: %" PRIu64 ",\nBW_peak: %.2lf,\nBW_average: %.2lf,\nMsgRate: %.6lf,\n"
 
-#define REPORT_FMT_PER_PORT     " %-7lu    %-10lu     %-7.2lf            %-7.2lf		   %-7.6lf        %-7.2lf            %-7.6lf              %-7.2lf            %-7.6lf"
+#define REPORT_FMT_EXT " %-7lu    %" PRIu64 "           %-7.6lf            %-7.6lf            %-7.6lf"
+
+#define REPORT_FMT_EXT_JSON "MsgSize: %lu,\nn_iterations: %" PRIu64 ",\nBW_peak: %.6lf,\nBW_average: %.6lf,\nMsgRate: %.6lf,\n"
+
+#define REPORT_FMT_PER_PORT     " %-7lu    %-10" PRIu64 "     %-7.2lf            %-7.2lf		   %-7.6lf        %-7.2lf            %-7.6lf              %-7.2lf            %-7.6lf"
 
 #define REPORT_EXT	"\n"
+#define REPORT_EXT_JSON	""
 
 #define REPORT_EXT_CPU_UTIL	"	    %-3.2f\n"
+#define REPORT_EXT_CPU_UTIL_JSON "CPU_util: %.2f,\n"
 
 #define REPORT_FMT_QOS " %-7lu    %d           %lu           %-7.2lf            %-7.2lf                  %-7.6lf\n"
 
+#define REPORT_FMT_QOS_JSON "MsgSize: %lu,\nsl: %d,\nn_iterations: %lu,\nBW_peak: %.2lf,\nBW_average: %.2lf,\n MsgRate: %.6lf,\n"
+
 /* Result print format for latency tests. */
-#define REPORT_FMT_LAT " %-7lu %d          %-7.2f        %-7.2f      %-7.2f  	       %-7.2f     	%-7.2f		%-7.2f 		%-7.2f"
-#define REPORT_FMT_LAT_DUR " %-7lu       %d            %-7.2f        %-7.2f"
+#define REPORT_FMT_LAT " %-7lu %" PRIu64 "          %-7.2f        %-7.2f      %-7.2f  	       %-7.2f     	%-7.2f		%-7.2f 		%-7.2f"
 
-#define REPORT_FMT_FS_RATE " %d          %-7.2f        		%-7.2f      	%-7.2f  	       		%-7.2f     	%-7.2f"
+#define REPORT_FMT_LAT_JSON "MsgSize: %lu,\nn_iterations: %" PRIu64 ",\nt_min: %.2f,\nt_max: %.2f,\nt_typical: %.2f,\nt_avg: %.2f,\n\
+t_stdev: %.2f,\npercentile_99: %.2f,\npercentile_99.9: %.2f,\n"
 
-#define REPORT_FMT_FS_RATE_DUR " %d               %-7.2f		%-7.2f"
+#define REPORT_FMT_LAT_DUR " %-7lu       %" PRIu64 "            %-7.2f        %-7.2f"
 
-#define CHECK_VALUE(arg,type,minv,maxv,name) 						    					\
-{ arg = (type)strtol(optarg, NULL, 0); if ((arg < minv) || (arg > maxv))                \
-	{ fprintf(stderr," %s should be between %d and %d\n",name,minv,maxv); return 1; }}
+#define REPORT_FMT_LAT_DUR_JSON "MsgSize: %lu,\nn_iterations: %" PRIu64 ",\nt_avg: %.2f,\ntps_average: %.2f,\n"
+
+#define REPORT_FMT_FS_RATE "%" PRIu64 "          %-7.2f        		%-7.2f      	%-7.2f  	       		%-7.2f     	%-7.2f"
+
+#define REPORT_FMT_FS_RATE_DUR  "%" PRIu64 "               %-7.2f		%-7.2f"
+
+#define CHECK_VALUE(arg,type,name,not_int_ptr) {\
+        arg = (type)strtol(optarg, &not_int_ptr, 0);\
+        if (*not_int_ptr != '\0') /*not integer part is not empty*/ {\
+                fprintf(stderr," %s argument %s should be %s\n",name,optarg,#type);\
+                return 1;\
+        }\
+}
+
+#define CHECK_VALUE_IN_RANGE(arg,type,minv,maxv,name,not_int_ptr) {\
+	CHECK_VALUE(arg,type,name,not_int_ptr)\
+	if ((arg < minv) || (arg > maxv)) {\
+		fprintf(stderr," %s should be between %d and %d\n",name,minv,maxv);\
+		return 1;\
+	}\
+}
+
+#define CHECK_VALUE_POSITIVE(arg,type,name,not_int_ptr) {\
+	CHECK_VALUE(arg,type,name,not_int_ptr)\
+	if (arg <= 0) {\
+		fprintf(stderr," %s must be positive\n",name);\
+		return 1;\
+	}\
+}
+
+#define CHECK_VALUE_NON_NEGATIVE(arg,type,name,not_int_ptr) {\
+	CHECK_VALUE(arg,type,name,not_int_ptr)\
+	if (arg < 0) {\
+		fprintf(stderr," %s must be non-negative %s\n",name,#type);\
+		return 1;\
+	}\
+}
+
+#define CHECK_VALUE_IN_RANGE_UNS(arg,type,minv,maxv,name,not_int_ptr) {\
+	CHECK_VALUE(arg,type,name,not_int_ptr)\
+	if ((arg < minv) || (arg > maxv)) {\
+		fprintf(stderr," %s should be between %lu and %lu\n",name,(long unsigned int)minv,(long unsigned int)maxv);\
+		return 1;\
+	}\
+}
 
 /* Macro for allocating. */
 #define ALLOCATE(var,type,size)                                     \
 { if((var = (type*)malloc(sizeof(type)*(size))) == NULL)        \
 	{ fprintf(stderr," Cannot Allocate\n"); exit(1);}}
+
+/* Macro for allocating in alloc_ctx function */
+#define ALLOC(var,type,size)									\
+{ if((var = (type*)malloc(sizeof(type)*(size))) == NULL)        \
+	{ fprintf(stderr," Cannot Allocate\n"); dealloc_ctx(ctx, user_param); return 1;}}
+
+/* Macro for allocating and jump to destroy labels in case of failures */
+#define MAIN_ALLOC(var,type,size,label)									\
+{ if((var = (type*)malloc(sizeof(type)*(size))) == NULL)        \
+	{ fprintf(stderr," Cannot Allocate\n"); goto label;}}
 
 /* This is our string builder */
 #define GET_STRING(orig,temp) 						            \
@@ -290,7 +369,19 @@ enum ctx_device {
 	CONNECTX5		= 15,
 	CONNECTX5EX		= 16,
 	CONNECTX6		= 17,
-	BLUEFIELD		= 18
+	CONNECTX6DX		= 18,
+	MLX5GENVF		= 19,
+	BLUEFIELD		= 20,
+	BLUEFIELD2		= 21,
+	INTEL_ALL		= 22,
+	NETXTREME		= 23,
+	EFA			= 24,
+	CONNECTX6LX		= 25,
+	CONNECTX7		= 26,
+	QLOGIC_AHP		= 27,
+	BLUEFIELD3		= 28,
+	ERDMA			= 29,
+	HNS			= 30,
 };
 
 /* Units for rate limiter */
@@ -301,12 +392,6 @@ enum rate_limiter_types {HW_RATE_LIMIT, SW_RATE_LIMIT, PP_RATE_LIMIT, DISABLE_RA
 
 /* Verbosity Levels for test report */
 enum verbosity_level {FULL_VERBOSITY=-1, OUTPUT_BW=0, OUTPUT_MR, OUTPUT_LAT };
-
-/*Accelerated verbs */
-enum verbs_intf {
-	NORMAL_INTF,
-	ACCL_INTF,
-};
 
 struct cpu_util_data {
 	int enable;
@@ -330,6 +415,7 @@ struct check_alive_data {
  *	 	src_mac - source MAC address of the packet
  *	 	dst_mac - destination MAC address of the packet
  *	 	eth_type - IP/or size of ptk
+ *		user_param - the parameters element.
  *
  *
 struct ETH_header {
@@ -355,10 +441,22 @@ struct perftest_parameters {
 	int				mtu;
 	enum ibv_mtu			curr_mtu;
 	uint64_t			size;
+	int				req_size;
 	uint64_t			dct_key;
-	int				iters;
+	uint64_t			iters;
 	uint64_t			iters_per_port[2];
+	uint64_t			last_iters;
 	uint64_t			*port_by_qp;
+	uint16_t			log_dci_streams;
+	uint16_t			log_active_dci_streams;
+	uint16_t			aes_xts;
+	uint16_t			encrypt_on_tx;
+	uint16_t			sig_before;
+	int 				aes_block_size;
+	int 				data_enc_keys_number;
+	char				*credentials_path;
+	char				*kek_path;
+	char				*data_enc_key_app_path;
 	int				tx_depth;
 	uint8_t				qp_timeout;
 	uint8_t				sl;
@@ -399,15 +497,16 @@ struct perftest_parameters {
 	int				eq_num;
 	int				use_eq_num;
 	int 				inline_size;
-	int				inline_recv_size;
 	int				out_reads;
 	int				rx_depth;
 	int				duplex;
 	int				noPeak;
 	int				cq_mod;
+	int				req_cq_mod;
 	int 				spec;
 	int 				dualport;
 	int 				post_list;
+	int 				recv_post_list;
 	int				duration;
 	int 				use_srq;
 	int				use_xrc;
@@ -446,7 +545,21 @@ struct perftest_parameters {
 	int				buff_size;
 	int             		pkey_index;
 	int				raw_qos;
+	int				has_payload_modification;
+	char*				payload_file_path;
+	char*				payload_content;
+#ifdef HAVE_CUDA
 	int				use_cuda;
+	int				cuda_device_id;
+	char				*cuda_device_bus_id;
+#ifdef HAVE_CUDA_DMABUF
+	int				use_cuda_dmabuf;
+#endif
+#endif
+#ifdef HAVE_ROCM
+	int				use_rocm;
+	int				rocm_device_id;
+#endif
 	char				*mmap_file;
 	unsigned long			mmap_offset;
 	/* New test params format pilot. will be used in all flags soon,. */
@@ -470,17 +583,19 @@ struct perftest_parameters {
 	int				is_rate_limit_type;
 	enum verbosity_level 		output;
 	int 				cpu_util;
+	int 				out_json;
+	char				*out_json_file_name;
 	struct cpu_util_data 		cpu_util_data;
 	int 				latency_gap;
 	int 				flow_label;
 	int 				retry_count;
 	int 				dont_xchg_versions;
-	int 				use_exp;
 	int 				ipv6;
 	int 				raw_ipv6;
 	int 				report_per_port;
 	int 				use_odp;
 	int				use_hugepages;
+	int				use_old_post_send;
 	int				use_promiscuous;
 	int				use_sniffer;
 	int				check_alive_exited;
@@ -488,24 +603,23 @@ struct perftest_parameters {
 	int				masked_atomics;
 	int				cycle_buffer;
 	int				cache_line_size;
-	enum verbs_intf			verb_type;
-	int				is_exp_cq;
-	int				is_exp_qp;
-	int				use_res_domain;
 	int				mr_per_qp;
 	uint16_t			dlid;
 	uint8_t				traffic_class;
 	uint32_t			wait_destroy;
-	int				disable_fcs;
 	int				flows;
 	int				flows_burst;
 	uint32_t			reply_every;
 	int				perform_warm_up;
 	int				use_ooo;
-	int                             vlan_en;
+	int				vlan_en;
 	uint32_t			vlan_pcp;
-	void 				(*print_eth_func)(void*);
-
+	void 				(*print_eth_func)(void*, struct perftest_parameters *);
+	int				disable_pcir;
+	struct counter_context		*counter_ctx;
+	char				*source_ip;
+	int 				has_source_ip;
+	int 			ah_allocated;
 };
 
 struct report_options {
@@ -555,9 +669,6 @@ static const struct rate_gbps_string RATE_VALUES[RATE_VALUES_COUNT] = {
 	{IBV_RATE_MAX, "MAX"}
 };
 
-
-
-
 /* link_layer_str
  *
  * Description : Return a String representation of the link type.
@@ -597,9 +708,9 @@ const int str_link_layer(const char *str);
  */
 int parser(struct perftest_parameters *user_param,char *argv[], int argc);
 
-/* check_link_and_mtu
+/* check_link
  *
- * Description : Configures test MTU,inline and link layer of the test.
+ * Description : Configures test inline and link layer of the test.
  *
  * Parameters :
  *

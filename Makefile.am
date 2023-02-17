@@ -34,11 +34,36 @@ ACLOCAL_AMFLAGS= -I m4
 AUTOMAKE_OPTIONS= subdir-objects
 
 noinst_LIBRARIES = libperftest.a
-libperftest_a_SOURCES = src/get_clock.c src/perftest_communication.c src/perftest_parameters.c src/perftest_resources.c
-noinst_HEADERS = src/get_clock.h src/perftest_communication.h src/perftest_parameters.h src/perftest_resources.h
+libperftest_a_SOURCES = src/get_clock.c src/perftest_communication.c src/perftest_parameters.c src/perftest_resources.c src/perftest_counters.c
+noinst_HEADERS = src/get_clock.h src/perftest_communication.h src/perftest_parameters.h src/perftest_resources.h src/perftest_counters.h
 
 bin_PROGRAMS = ib_send_bw ib_send_lat ib_write_lat ib_write_bw ib_read_lat ib_read_bw ib_atomic_lat ib_atomic_bw
 bin_SCRIPTS = run_perftest_loopback run_perftest_multi_devices
+
+# Non-source man pages:
+man1_MANS = \
+	man/ib_write_bw.1 \
+	man/ib_read_bw.1 \
+	man/ib_send_bw.1 \
+	man/ib_atomic_bw.1 \
+	man/ib_write_lat.1 \
+	man/ib_read_lat.1 \
+	man/ib_send_lat.1 \
+	man/ib_atomic_lat.1 \
+	man/raw_ethernet_bw.1 \
+	man/raw_ethernet_lat.1 \
+	man/raw_ethernet_burst_lat.1 \
+	man/raw_ethernet_fs_rate.1 \
+	#
+
+dist_man_MANS = man/perftest.1
+
+generated_mans = $(man1_MANS)
+$(generated_mans): man/%.1: man/perftest.1
+	ln -s perftest.1 $@
+
+clean-local:
+	-rm -f man/[ir]*.1
 
 if HAVE_RAW_ETH
 libperftest_a_SOURCES += src/raw_ethernet_resources.c
@@ -52,48 +77,46 @@ endif
 
 if IS_FREEBSD
 LIBMLX4= -lmlx4
-LIBMLX5= -lmlx5
 else
 LIBMLX4=
-LIBMLX5=
 endif
 
 ib_send_bw_SOURCES = src/send_bw.c src/multicast_resources.c src/multicast_resources.h
-ib_send_bw_LDADD = libperftest.a $(LIBUMAD) $(LIBMATH) $(LIBMLX4) $(LIBMLX5)
+ib_send_bw_LDADD = libperftest.a $(LIBUMAD) $(LIBMATH) $(LIBMLX4) $(LIBMLX5) $(LIBEFA)
 
 ib_send_lat_SOURCES = src/send_lat.c src/multicast_resources.c src/multicast_resources.h
-ib_send_lat_LDADD = libperftest.a $(LIBUMAD) $(LIBMATH) $(LIBMLX4) $(LIBMLX5)
+ib_send_lat_LDADD = libperftest.a $(LIBUMAD) $(LIBMATH) $(LIBMLX4) $(LIBMLX5) $(LIBEFA)
 
 ib_write_lat_SOURCES = src/write_lat.c
-ib_write_lat_LDADD = libperftest.a $(LIBMATH)  $(LIBMLX4) $(LIBMLX5)
+ib_write_lat_LDADD = libperftest.a $(LIBMATH)  $(LIBMLX4) $(LIBMLX5) $(LIBEFA)
 
 ib_write_bw_SOURCES = src/write_bw.c
-ib_write_bw_LDADD = libperftest.a $(LIBMATH) $(LIBMLX4) $(LIBMLX5)
+ib_write_bw_LDADD = libperftest.a $(LIBMATH) $(LIBMLX4) $(LIBMLX5) $(LIBEFA)
 
 ib_read_lat_SOURCES = src/read_lat.c
-ib_read_lat_LDADD = libperftest.a $(LIBMATH) $(LIBMLX4) $(LIBMLX5)
+ib_read_lat_LDADD = libperftest.a $(LIBMATH) $(LIBMLX4) $(LIBMLX5) $(LIBEFA)
 
 ib_read_bw_SOURCES = src/read_bw.c
-ib_read_bw_LDADD = libperftest.a $(LIBMATH) $(LIBMLX4) $(LIBMLX5)
+ib_read_bw_LDADD = libperftest.a $(LIBMATH) $(LIBMLX4) $(LIBMLX5) $(LIBEFA)
 
 ib_atomic_lat_SOURCES = src/atomic_lat.c
-ib_atomic_lat_LDADD = libperftest.a $(LIBMATH) $(LIBMLX4) $(LIBMLX5)
+ib_atomic_lat_LDADD = libperftest.a $(LIBMATH) $(LIBMLX4) $(LIBMLX5) $(LIBEFA)
 
 ib_atomic_bw_SOURCES = src/atomic_bw.c
-ib_atomic_bw_LDADD = libperftest.a $(LIBMATH) $(LIBMLX4) $(LIBMLX5)
+ib_atomic_bw_LDADD = libperftest.a $(LIBMATH) $(LIBMLX4) $(LIBMLX5) $(LIBEFA)
 
 if HAVE_RAW_ETH
 raw_ethernet_bw_SOURCES = src/raw_ethernet_send_bw.c
-raw_ethernet_bw_LDADD = libperftest.a $(LIBMATH) $(LIBMLX4) $(LIBMLX5)
+raw_ethernet_bw_LDADD = libperftest.a $(LIBMATH) $(LIBMLX4) $(LIBMLX5) $(LIBEFA)
 
 raw_ethernet_lat_SOURCES = src/raw_ethernet_send_lat.c
-raw_ethernet_lat_LDADD = libperftest.a $(LIBMATH) $(LIBMLX4) $(LIBMLX5)
+raw_ethernet_lat_LDADD = libperftest.a $(LIBMATH) $(LIBMLX4) $(LIBMLX5) $(LIBEFA)
 
 raw_ethernet_burst_lat_SOURCES = src/raw_ethernet_send_burst_lat.c
-raw_ethernet_burst_lat_LDADD = libperftest.a $(LIBMATH) $(LIBMLX4) $(LIBMLX5)
+raw_ethernet_burst_lat_LDADD = libperftest.a $(LIBMATH) $(LIBMLX4) $(LIBMLX5) $(LIBEFA)
 
 raw_ethernet_fs_rate_SOURCES = src/raw_ethernet_fs_rate.c
-raw_ethernet_fs_rate_LDADD = libperftest.a $(LIBMATH) $(LIBMLX4) $(LIBMLX5)
+raw_ethernet_fs_rate_LDADD = libperftest.a $(LIBMATH) $(LIBMLX4) $(LIBMLX5) $(LIBEFA)
 
 else
 raw_ethernet_bw_SOURCES =
@@ -103,4 +126,3 @@ raw_ethernet_lat_SOURCES =
 raw_ethernet_lat_LDADD =
 
 endif
-

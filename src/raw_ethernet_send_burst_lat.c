@@ -37,7 +37,6 @@
 #if defined(__FreeBSD__)
 #include <sys/types.h>
 #include <netinet/in.h>
-#include <netinet/ip.h>
 #endif
 
 #include <stdio.h>
@@ -45,7 +44,7 @@
 #include <string.h>
 #include <signal.h>
 #include <getopt.h>
-#include </usr/include/netinet/ip.h>
+#include <netinet/ip.h>
 #include <poll.h>
 #include "perftest_parameters.h"
 #include "perftest_resources.h"
@@ -65,17 +64,11 @@ int main(int argc, char *argv[])
 	struct raw_ethernet_info	my_dest_info,rem_dest_info;
 	int				ret_parser;
 	struct perftest_parameters	user_param;
-	#ifdef HAVE_RAW_ETH_EXP
-	struct ibv_exp_flow		**flow_create_result;
-	struct ibv_exp_flow_attr	**flow_rules;
-	struct ibv_exp_flow 		*flow_promisc = NULL;
-	#else
 	struct ibv_flow			**flow_create_result;
 	struct ibv_flow_attr		**flow_rules;
 	struct ibv_flow 		*flow_promisc = NULL;
-	#endif
 	struct report_options		report;
-	int				i;
+	int				i, flows_created = 0;
 
 	/* allocate memory space for user parameters &*/
 	memset(&ctx,		0, sizeof(struct pingpong_context));
@@ -102,15 +95,10 @@ int main(int argc, char *argv[])
 		if (ret_parser != VERSION_EXIT && ret_parser != HELP_EXIT)
 			fprintf(stderr," Parser function exited with Error\n");
 		DEBUG_LOG(TRACE,"<<<<<<%s",__FUNCTION__);
-		return FAILURE;
+		goto return_error;
 	}
-	#ifdef HAVE_RAW_ETH_EXP
-	ALLOCATE(flow_create_result, struct ibv_exp_flow*, user_param.flows);
-	ALLOCATE(flow_rules, struct ibv_exp_flow_attr*, user_param.flows);
-	#else
-	ALLOCATE(flow_create_result, struct ibv_flow*, user_param.flows);
-	ALLOCATE(flow_rules, struct ibv_flow_attr*, user_param.flows);
-	#endif
+	MAIN_ALLOC(flow_create_result, struct ibv_flow*, user_param.flows, return_error);
+	MAIN_ALLOC(flow_rules, struct ibv_flow_attr*, user_param.flows, free_flow_results);
 
 
 	/*this is a bidirectional test, so we need to let the init functions
@@ -119,16 +107,15 @@ int main(int argc, char *argv[])
 	user_param.duplex  = 1;
 
 	/* Find the selected IB device (or default if the user didn't select one). */
-	ib_dev = ctx_find_dev(user_param.ib_devname);
+	ib_dev = ctx_find_dev(&user_param.ib_devname);
 	if (!ib_dev) {
 		fprintf(stderr," Unable to find the Infiniband/RoCE device\n");
 		DEBUG_LOG(TRACE,"<<<<<<%s",__FUNCTION__);
-		return FAILURE;
+		goto free_mem;
 	}
-	GET_STRING(user_param.ib_devname, ibv_get_device_name(ib_dev));
 
 	if (check_flow_steering_support(user_param.ib_devname)) {
-		return FAILURE;
+		goto free_devname;
 	}
 
 	/* Getting the relevant context from the device */
@@ -136,31 +123,35 @@ int main(int argc, char *argv[])
 	if (!ctx.context) {
 		fprintf(stderr, " Couldn't get context for the device\n");
 		DEBUG_LOG(TRACE,"<<<<<<%s",__FUNCTION__);
-		return FAILURE;
+		goto free_devname;
 	}
 
 	/* Verify user parameters that require the device context,
 	 * the function will print the relevent error info. */
 	if (verify_params_with_device_context(ctx.context, &user_param)) {
-		return FAILURE;
+		goto free_devname;
 	}
 
 	/* See if MTU and link type are valid and supported. */
 	if (check_link_and_mtu(ctx.context, &user_param)) {
 		fprintf(stderr, " Couldn't get context for the device\n");
 		DEBUG_LOG(TRACE,"<<<<<<%s",__FUNCTION__);
-		return FAILURE;
+		goto free_devname;
 	}
 
 	/* Allocating arrays needed for the test. */
-	alloc_ctx(&ctx, &user_param);
+	if (alloc_ctx(&ctx,&user_param)){
+		fprintf(stderr, "Couldn't allocate context\n");
+		goto free_devname;
+	}
 
 	/*set up the connection, return the required flow rules (notice that user_param->duplex == TRUE)
 	 * so the function will setup like it's a bidirectional test
 	 */
 	if (send_set_up_connection(flow_rules, &ctx, &user_param, &my_dest_info, &rem_dest_info)) {
 		fprintf(stderr," Unable to set up socket connection\n");
-		return FAILURE;
+		dealloc_ctx(&ctx, &user_param);
+			goto free_devname;
 	}
 
 	/* Print basic test information. */
@@ -172,39 +163,24 @@ int main(int argc, char *argv[])
 	/* initalize IB resources (data buffer, PD, MR, CQ and events channel) */
 	if (ctx_init(&ctx, &user_param)) {
 		fprintf(stderr, " Couldn't create IB resources\n");
-		return FAILURE;
+		dealloc_ctx(&ctx, &user_param);
+			goto free_devname;
 	}
 
 
 	/* attaching the qp to the spec */
 	for (i = 0; i < user_param.flows; i++) {
-		#ifdef HAVE_RAW_ETH_EXP
-		flow_create_result[i] = ibv_exp_create_flow(ctx.qp[0], flow_rules[i]);
-		#else
 		flow_create_result[i] = ibv_create_flow(ctx.qp[0], flow_rules[i]);
-		#endif
 
 		if (!flow_create_result[i]){
 			perror("error");
 			fprintf(stderr, "Couldn't attach QP\n");
-			return FAILURE;
+			goto result_flow_destroy;
 		}
+		flows_created++;
 	}
 
 	if (user_param.use_promiscuous) {
-		#ifdef HAVE_RAW_ETH_EXP
-		struct ibv_exp_flow_attr attr = {
-			.type = IBV_EXP_FLOW_ATTR_ALL_DEFAULT,
-			.num_of_specs = 0,
-			.port = user_param.ib_port,
-			.flags = 0
-		};
-
-		if ((flow_promisc = ibv_exp_create_flow(ctx.qp[0], &attr)) == NULL) {
-			perror("error");
-			fprintf(stderr, "Couldn't attach promiscuous rule QP\n");
-		}
-		#else
 		struct ibv_flow_attr attr = {
 			.type = IBV_FLOW_ATTR_ALL_DEFAULT,
 			.num_of_specs = 0,
@@ -215,10 +191,9 @@ int main(int argc, char *argv[])
 		if ((flow_promisc = ibv_create_flow(ctx.qp[0], &attr)) == NULL) {
 			perror("error");
 			fprintf(stderr, "Couldn't attach promiscuous rule QP\n");
+			goto result_flow_destroy;
 		}
-		#endif
 	}
-
 	/* build ONE Raw Ethernet packets on ctx buffer */
 	create_raw_eth_pkt(&user_param, &ctx, (void*)ctx.buf[0], &my_dest_info , &rem_dest_info);
 
@@ -232,24 +207,24 @@ int main(int argc, char *argv[])
 	if (ctx_connect(&ctx, NULL, &user_param, NULL)) {
 		fprintf(stderr," Unable to Connect the HCA's through the link\n");
 		DEBUG_LOG(TRACE,"<<<<<<%s",__FUNCTION__);
-		return FAILURE;
+		goto promisc_flow_destroy;
 	}
 
 	ctx_set_send_wqes(&ctx,&user_param,NULL);
 
 	if (ctx_set_recv_wqes(&ctx,&user_param)) {
 		fprintf(stderr," Failed to post receive recv_wqes\n");
-		return FAILURE;
+		goto free_devname;
 	}
 
 	/* latency test function for SEND verb latency test. */
 	if (user_param.machine == CLIENT) {
 		if (run_iter_lat_burst(&ctx, &user_param))
-			return FAILURE;
+			goto free_devname;
 	}
 	else {
 		if (run_iter_lat_burst_server(&ctx, &user_param))
-			return FAILURE;
+			goto free_devname;
 	}
 
 	/* print report (like print_report_bw) in the correct format
@@ -260,27 +235,19 @@ int main(int argc, char *argv[])
 
 	/* destroy promisc flow */
 	if (user_param.use_promiscuous) {
-		#ifdef HAVE_RAW_ETH_EXP
-		if (ibv_exp_destroy_flow(flow_promisc)) {
-		#else
 		if (ibv_destroy_flow(flow_promisc)) {
-		#endif
 			perror("error");
 			fprintf(stderr, "Couldn't destroy promisc flow\n");
-			return FAILURE;
+			goto result_flow_destroy;
 		}
 	}
 
 	/* destroy flow */
 	for (i = 0; i < user_param.flows; i++) {
-		#ifdef HAVE_RAW_ETH_EXP
-		if (ibv_exp_destroy_flow(flow_create_result[i])) {
-		#else
 		if (ibv_destroy_flow(flow_create_result[i])) {
-		#endif
 			perror("error");
 			fprintf(stderr, "Couldn't destroy flow\n");
-			return FAILURE;
+			goto destroy_ctx;
 		}
 
 		free(flow_rules[i]);
@@ -290,12 +257,41 @@ int main(int argc, char *argv[])
 	if (destroy_ctx(&ctx, &user_param)) {
 		fprintf(stderr,"Failed to destroy_ctx\n");
 		DEBUG_LOG(TRACE,"<<<<<<%s",__FUNCTION__);
-		return FAILURE;
+		goto free_devname;
 	}
+
+	free(flow_create_result);
+	free(flow_rules);
+	free(user_param.ib_devname);
 
 	if (user_param.output == FULL_VERBOSITY)
 		printf(RESULT_LINE);
 
 	DEBUG_LOG(TRACE,"<<<<<<%s",__FUNCTION__);
 	return SUCCESS;
+
+promisc_flow_destroy:
+	if (user_param.use_promiscuous) {
+		if (ibv_destroy_flow(flow_promisc)) {
+			perror("error");
+			fprintf(stderr, "Couldn't destroy promisc flow\n");
+		}
+	}
+result_flow_destroy:
+	for (i = 0; i < flows_created; i++) {
+		if (ibv_destroy_flow(flow_create_result[i])) {
+			perror("error");
+			fprintf(stderr, "Couldn't destroy flow\n");
+		}
+	}
+destroy_ctx:
+	destroy_ctx(&ctx, &user_param);
+free_devname:
+	free(user_param.ib_devname);
+free_mem:
+	free(flow_rules);
+free_flow_results:
+	free(flow_create_result);
+return_error:
+	return FAILURE;
 }
